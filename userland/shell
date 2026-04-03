@@ -1,0 +1,266 @@
+#include "stdlib.h"
+#include "eugene_libc.c" // Підключаємо твої утиліти!
+
+// === 1. СИСКОЛ МИШІ ===
+// Додаємо сюди, щоб ти не міняв свій stdlib.h
+static inline void get_mouse(uint32_t* x, uint32_t* y, uint32_t* click) {
+    uint64_t mx, my, mc;
+    __asm__ volatile (
+        "int $0x80"
+        : "=c"(mx), "=d"(my), "=8"(mc)
+        : "a"(11)
+        : "memory"
+    );
+    *x = (uint32_t)mx; *y = (uint32_t)my; *click = (uint32_t)mc;
+}
+
+// === 2. БАЗОВИЙ ШРИФТ 8x8 (ASCII 32 - 95) ===
+// Щоб не займати багато місця, тут символи від Пробілу до Знаку питання, цифри та ВЕЛИКІ літери
+const uint8_t font8x8[64][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* 32 Space */
+    {0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00}, /* 33 ! */
+    {0x24,0x24,0x24,0x00,0x00,0x00,0x00,0x00}, /* 34 " */
+    {0x24,0x24,0x7E,0x24,0x7E,0x24,0x24,0x00}, /* 35 # */
+    {0x18,0x3C,0x60,0x3C,0x06,0x3C,0x18,0x00}, /* 36 $ */
+    {0x66,0xC6,0x18,0x18,0x30,0x66,0x00,0x00}, /* 37 % */
+    {0x38,0x6C,0x38,0x76,0xDC,0x00,0x00,0x00}, /* 38 & */
+    {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00}, /* 39 ' */
+    {0x0C,0x18,0x30,0x30,0x18,0x0C,0x00,0x00}, /* 40 ( */
+    {0x30,0x18,0x0C,0x0C,0x18,0x30,0x00,0x00}, /* 41 ) */
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, /* 42 * */
+    {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00}, /* 43 + */
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, /* 44 , */
+    {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, /* 45 - */
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, /* 46 . */
+    {0x00,0x60,0x30,0x18,0x0C,0x06,0x00,0x00}, /* 47 / */
+    {0x3C,0x66,0x66,0x66,0x66,0x3C,0x00,0x00}, /* 48 0 */
+    {0x18,0x38,0x18,0x18,0x18,0x3C,0x00,0x00}, /* 49 1 */
+    {0x3C,0x66,0x0C,0x18,0x30,0x7E,0x00,0x00}, /* 50 2 */
+    {0x3C,0x66,0x0C,0x0C,0x66,0x3C,0x00,0x00}, /* 51 3 */
+    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x00,0x00}, /* 52 4 */
+    {0x7E,0x60,0x3E,0x06,0x06,0x3C,0x00,0x00}, /* 53 5 */
+    {0x1C,0x30,0x60,0x3C,0x66,0x3C,0x00,0x00}, /* 54 6 */
+    {0x7E,0x06,0x0C,0x18,0x30,0x30,0x00,0x00}, /* 55 7 */
+    {0x3C,0x66,0x3C,0x66,0x3C,0x00,0x00,0x00}, /* 56 8 */
+    {0x3C,0x66,0x3C,0x06,0x0C,0x38,0x00,0x00}, /* 57 9 */
+    {0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00}, /* 58 : */
+    {0x00,0x18,0x18,0x00,0x18,0x18,0x30,0x00}, /* 59 ; */
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, /* 60 < */
+    {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}, /* 61 = */
+    {0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00}, /* 62 > */
+    {0x3C,0x66,0x0C,0x18,0x00,0x18,0x00,0x00}, /* 63 ? */
+    {0x3C,0x66,0x6E,0x6E,0x60,0x3E,0x00,0x00}, /* 64 @ */
+    {0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00}, /* 65 A */
+    {0x7E,0x66,0x66,0x7E,0x66,0x66,0x7E,0x00}, /* 66 B */
+    {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00}, /* 67 C */
+    {0x7C,0x66,0x66,0x66,0x66,0x66,0x7C,0x00}, /* 68 D */
+    {0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00}, /* 69 E */
+    {0x7E,0x60,0x60,0x78,0x60,0x60,0x60,0x00}, /* 70 F */
+    {0x3C,0x66,0x60,0x6E,0x66,0x3C,0x00,0x00}, /* 71 G */
+    {0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}, /* 72 H */
+    {0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, /* 73 I */
+    {0x1E,0x06,0x06,0x06,0x66,0x3C,0x00,0x00}, /* 74 J */
+    {0x66,0x6C,0x78,0x78,0x6C,0x66,0x00,0x00}, /* 75 K */
+    {0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00}, /* 76 L */
+    {0x63,0x77,0x7F,0x6B,0x63,0x63,0x00,0x00}, /* 77 M */
+    {0x66,0x76,0x7F,0x6E,0x66,0x66,0x00,0x00}, /* 78 N */
+    {0x3C,0x66,0x66,0x66,0x66,0x3C,0x00,0x00}, /* 79 O */
+    {0x7E,0x66,0x66,0x7E,0x60,0x60,0x00,0x00}, /* 80 P */
+    {0x3C,0x66,0x66,0x66,0x6C,0x36,0x00,0x00}, /* 81 Q */
+    {0x7E,0x66,0x66,0x7E,0x6C,0x66,0x00,0x00}, /* 82 R */
+    {0x3C,0x60,0x3C,0x06,0x66,0x3C,0x00,0x00}, /* 83 S */
+    {0x7E,0x18,0x18,0x18,0x18,0x18,0x00,0x00}, /* 84 T */
+    {0x66,0x66,0x66,0x66,0x66,0x3C,0x00,0x00}, /* 85 U */
+    {0x66,0x66,0x66,0x66,0x3C,0x18,0x00,0x00}, /* 86 V */
+    {0x63,0x63,0x6B,0x7F,0x77,0x63,0x00,0x00}, /* 87 W */
+    {0x66,0x66,0x3C,0x18,0x3C,0x66,0x00,0x00}, /* 88 X */
+    {0x66,0x66,0x3C,0x18,0x18,0x18,0x00,0x00}, /* 89 Y */
+    {0x7E,0x06,0x0C,0x18,0x30,0x7E,0x00,0x00}, /* 90 Z */
+    {0x3C,0x30,0x30,0x30,0x30,0x3C,0x00,0x00}, /* 91 [ */
+    {0x00,0x06,0x0C,0x18,0x30,0x60,0x00,0x00}, /* 92 \ */
+    {0x3C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00,0x00}, /* 93 ] */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00}, /* 94 _ */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}  /* 95 Space/Err */
+};
+
+const char scancodes[128] = {
+    0, 0, '1','2','3','4','5','6','7','8','9','0','-','=', 0, 0,
+    'Q','W','E','R','T','Y','U','I','O','P','[',']', 0, 0,
+    'A','S','D','F','G','H','J','K','L',';','\'','`', 0, '\\',
+    'Z','X','C','V','B','N','M',',','.','/', 0, '*', 0, ' '
+};
+
+// === 3. ВІКОННА ПІДСИСТЕМА РЕНДЕРУ ===
+#define WIN_W 500
+#define WIN_H 350
+uint32_t win_buffer[WIN_W * WIN_H];
+
+void win_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    for (uint32_t iy = y; iy < y + h; iy++) {
+        for (uint32_t ix = x; ix < x + w; ix++) {
+            if (ix < WIN_W && iy < WIN_H) win_buffer[iy * WIN_W + ix] = color;
+        }
+    }
+}
+
+// Малює символ ПРЯМО В БУФЕР ВІКНА!
+void win_draw_char(char c, uint32_t x, uint32_t y, uint32_t color) {
+    int idx = toupper(c) - 32;
+    if (idx < 0 || idx > 63) idx = 0; // Невідомі символи малюємо як пробіл
+    
+    for (int cy = 0; cy < 8; cy++) {
+        uint8_t row = font8x8[idx][cy];
+        for (int cx = 0; cx < 8; cx++) {
+            if ((row >> (7 - cx)) & 1) {
+                if (x + cx < WIN_W && y + cy < WIN_H) {
+                    win_buffer[(y + cy) * WIN_W + (x + cx)] = color;
+                }
+            }
+        }
+    }
+}
+
+// Малює рядок в буфер вікна
+void win_draw_string(char* text, uint32_t x, uint32_t y, uint32_t color) {
+    uint32_t cx = x;
+    for (int i = 0; text[i] != '\0'; i++) {
+        win_draw_char(text[i], cx, y, color);
+        cx += 9; // Відступ між літерами
+    }
+}
+
+// === 4. ТОЧКА ВХОДУ (GUI EVENT LOOP) ===
+void _start() {
+    clear_screen();
+    init_heap(); 
+
+    uint32_t win_x = 100, win_y = 50;
+    
+    // Стан миші та перетягування
+    uint32_t mx, my, mclick;
+    int is_dragging = 0;
+    uint32_t drag_off_x = 0, drag_off_y = 0;
+
+    // Дані консолі
+    char cmd_buffer[64] = {0};
+    int cmd_len = 0;
+    char history_log[12][64] = {0}; 
+    int log_count = 0;
+
+    // Прапорці оптимізації
+    int text_changed = 1; // Чи треба перемалювати текст усередині буфера?
+    int win_moved = 1;    // Чи треба викинути буфер на екран?
+
+    strcpy(history_log[log_count++], "EUGENE OS GUI SHELL V3.0");
+    strcpy(history_log[log_count++], "TYPE 'HELP' FOR COMMANDS.");
+
+    while (1) {
+        // --- 1. ОБРОБКА МИШІ ---
+        get_mouse(&mx, &my, &mclick);
+
+        if (mclick == 1) { 
+            if (!is_dragging) {
+                // Перевіряємо клік по заголовку
+                if (mx >= win_x && mx <= win_x + WIN_W && my >= win_y && my <= win_y + 24) {
+                    is_dragging = 1;
+                    drag_off_x = mx - win_x; drag_off_y = my - win_y;
+                }
+            } else {
+                // Вікно рухається! Оновлюємо координати
+                if (win_x != mx - drag_off_x || win_y != my - drag_off_y) {
+                    win_x = mx - drag_off_x; win_y = my - drag_off_y;
+                    win_moved = 1; 
+                }
+            }
+        } else {
+            is_dragging = 0;
+        }
+
+        // --- 2. ОБРОБКА КЛАВІАТУРИ ---
+        uint64_t key = get_key();
+        if (key > 0 && key < 0x80) {
+            
+            if (key == 0x1C) { // ENTER
+                cmd_buffer[cmd_len] = '\0';
+                
+                // Зберігаємо команду в лог (скролінг історії)
+                if (log_count >= 12) {
+                    for(int i=0; i<11; i++) strcpy(history_log[i], history_log[i+1]);
+                    log_count = 11;
+                }
+                
+                char full_cmd[80] = "C-SHELL:/> ";
+                strcat(full_cmd, cmd_buffer);
+                strcpy(history_log[log_count++], full_cmd);
+
+                // ПАРСЕР КОМАНД
+                if (strcmp(cmd_buffer, "HELP") == 0) {
+                    strcpy(history_log[log_count++], "CMD: HELP, CLEAR, BENCHMARK, EXIT");
+                } 
+                else if (strcmp(cmd_buffer, "CLEAR") == 0) {
+                    log_count = 0;
+                }
+                else if (strcmp(cmd_buffer, "BENCHMARK") == 0) {
+                    strcpy(history_log[log_count++], "BENCHMARK: OK (VFS NOT LINKED)");
+                }
+                else if (strcmp(cmd_buffer, "EXIT") == 0) {
+                    clear_screen(); 
+                    syscall(0,0,0); // Exit
+                }
+                else if (cmd_len > 0) {
+                    strcpy(history_log[log_count++], "UNKNOWN COMMAND");
+                }
+                
+                cmd_len = 0;
+                cmd_buffer[0] = '\0';
+                text_changed = 1;
+
+            } else if (key == 0x0E) { // BACKSPACE
+                if (cmd_len > 0) { 
+                    cmd_buffer[--cmd_len] = '\0'; 
+                    text_changed = 1; 
+                }
+            } else { // Звичайна літера
+                char c = scancodes[key];
+                if (c != 0 && cmd_len < 60) {
+                    cmd_buffer[cmd_len++] = c;
+                    cmd_buffer[cmd_len] = '\0';
+                    text_changed = 1;
+                }
+            }
+        }
+
+        // --- 3. ВНУТРІШНЄ МАЛЮВАННЯ (Тільки якщо ввели літеру) ---
+        if (text_changed) {
+            // Малюємо каркас вікна
+            win_draw_rect(0, 0, WIN_W, WIN_H, 0x00000000);       // Рамка
+            win_draw_rect(2, 2, WIN_W-4, WIN_H-4, 0x00C0C0C0);   // Фон
+            win_draw_rect(2, 2, WIN_W-4, 24, 0x000000AA);        // Синій заголовок
+            
+            win_draw_string("EUGENE OS: GUI SUBSYSTEM", 10, 8, 0x00FFFFFF);
+
+            // Малюємо історію
+            uint32_t text_y = 35;
+            for (int i = 0; i < log_count; i++) {
+                win_draw_string(history_log[i], 10, text_y, 0x00000000); // Чорний текст
+                text_y += 20;
+            }
+
+            // Малюємо поточний ввід
+            char prompt[100] = "C-SHELL:/> ";
+            strcat(prompt, cmd_buffer);
+            strcat(prompt, "_"); // Курсор
+            win_draw_string(prompt, 10, text_y, 0x00AA0000); // Синій текст
+            
+            text_changed = 0;
+            win_moved = 1; // Якщо ми змінили пікселі всередині, треба викинути на екран
+        }
+
+        // --- 4. КОМПОЗИЦІЯ ЕКРАНА (Тільки якщо рухали вікно або вводили текст) ---
+        if (win_moved) {
+            clear_screen(); // Очищаємо залишки старого вікна
+            blit_buffer(win_buffer, win_x, win_y, WIN_W, WIN_H); // Викидаємо вікно!
+            win_moved = 0;
+        }
+    }
+}
