@@ -1,0 +1,73 @@
+EN: Project Overview
+Summary
+EUGENE OS is a custom 64-bit operating system built from scratch for the x86-64 architecture. It features a monolithic assembly-based kernel and a C-based graphical user interface (GUI). The system implements multitasking, a FAT32 file system driver, and a window management engine.
+
+Key Features
+1. UEFI Bootloader
+Implemented as a native UEFI PE64 application.
+
+Initializes high-resolution video modes using the Graphics Output Protocol (GOP).
+
+Detects hardware specifications (CPU Brand, RAM size, Disk capacity) via UEFI Boot Services.
+
+Locates and loads the kernel binary (kernel.bin) from a FAT32 partition into memory at 0x100000.
+
+2. Kernel Architecture
+Language: Pure x86-64 Assembly (FASM).
+
+Interrupt Handling: Configured IDT (Interrupt Descriptor Table) for handling CPU exceptions (0-31) and system calls via int 0x80.
+
+Multitasking: Preemptive task scheduler driven by the PIT timer. Supports background tasks and userland application execution.
+
+Memory Management: Kernel-level heap manager providing kmalloc and kfree functionality.
+
+Hardware Drivers:
+
+Storage: ATA PIO mode for sector-level disk I/O.
+
+FileSystem: Robust FAT32 driver supporting file/directory creation, deletion, reading, and traversal.
+
+Input: PS/2 Keyboard driver with FIFO buffering; PS/2 Mouse driver with packet parsing and coordinate tracking.
+
+Audio: PC Speaker frequency generation using PIT.
+
+3. Userland & GUI Environment
+Custom LibC: Independent implementation of essential C functions (memory allocation, string manipulation, sprintf, POSIX-style I/O wrappers).
+
+Window Manager: * Double-buffered rendering to prevent screen flickering.
+
+Z-order management (active window focus).
+
+Event-driven mouse interaction: Window dragging, minimizing, and closing.
+
+Built-in Applications:
+
+C-Shell Console: Terminal emulator with command history and system utilities.
+
+Text Editor: Feature-rich editor with cursor support, arrow-key navigation, and file saving.
+
+File Explorer: Graphical VFS browser with file execution capabilities.
+
+Technical Specifications
+Codebase: ~90% Assembly (FASM), ~10% C (GCC/MinGW).
+
+Executable Format: Flat binary for the kernel and applications.
+
+Memory Map:
+
+0x1000000: Video/File Buffer.
+
+0x2000000: VFS Directory Buffer.
+
+0x4000000: Userland Application Base.
+
+0x8000000: Userland Heap.
+
+Build Instructions
+The project uses a custom build.bat script that requires:
+
+FASM (for bootloader and kernel).
+
+MinGW-w64 GCC/LD (for C userland).
+
+QEMU (for emulation with OVMF BIOS).
