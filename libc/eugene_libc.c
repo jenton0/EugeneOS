@@ -1,5 +1,23 @@
 #include "stdlib.h"
 
+/* ============================================================
+ * ВИПРАВЛЕННЯ В ЦЬОМУ ФАЙЛІ:
+ *  1) malloc() вирівнює блоки на 16 байт — інакше movaps/SSE по
+ *     виділеній пам'яті падає з #GP;
+ *  2) прибрано fabs()/atof() (повертали double -> несумісно з
+ *     -mgeneral-regs-only, а планувальник ядра не зберігає стан FPU);
+ *  3) open() більше не з'їдає 64 МБ купи з 64 МБ наявних;
+ *  4) read_file() тепер викликається з лімітом розміру буфера;
+ *  5) діагностичний друк схований за LIBC_DEBUG (був увімкнений
+ *     завжди і засмічував екран на кожному fread).
+ * ============================================================ */
+#define LIBC_DEBUG 0
+#if LIBC_DEBUG
+  #define DBG(buf, col) print((buf), (col))
+#else
+  #define DBG(buf, col) ((void)0)
+#endif
+
 // ==========================================
 // 1. СТРУКТУРИ ФАЙЛОВОЇ СИСТЕМИ
 // ==========================================
@@ -13,11 +31,7 @@ typedef struct {
 static DOOM_FILE* open_files[MAX_OPEN_FILES] = {0};
 
 // fd 3..10 → індекс 0..7
-static int alloc_fd(void) {
-    for (int i = 0; i < MAX_OPEN_FILES; i++)
-        if (!open_files[i]) return i + 3;
-    return -1;
-}
+/* alloc_fd() прибрано: розподілом дескрипторів тепер керує ядро */
 
 static DOOM_FILE* get_file(int fd) {
     int idx = fd - 3;
@@ -42,9 +56,16 @@ static inline int _FILE_to_fd(FILE* f) {
 // ==========================================
 // 2. МЕНЕДЖЕР ПАМ'ЯТІ
 // ==========================================
-// ВИПРАВЛЕНО: 0x8000000 (128MB) — не конфліктує з DirBuffer ядра (0x2000000)
-#define HEAP_START 0x8000000
-#define HEAP_SIZE  0x4000000  // 64MB
+/* КРИТИЧНО: адреса мусить збігатися з UserHeapBase у kernel.asm.
+ *
+ * Раніше тут стояло 0x8000000 — рівно там, де ядро тримає буфери
+ * файлових дескрипторів (FileDataBase, 64 МБ). Купа й буфери
+ * повністю накладалися: програма, яка виділяла пам'ять і водночас
+ * тримала відкритий файл, затирала власні дані.
+ *
+ * Тепер купа лежить вище за все інше — на 256 МБ. */
+#define HEAP_START 0x10000000  /* 256 МБ */
+#define HEAP_SIZE  0x8000000   /* 128 МБ */
 
 typedef struct Block {
     uint32_t size;
@@ -62,6 +83,10 @@ void init_heap(void) {
 
 void* malloc(size_t size) {
     if (size == 0) return 0;
+    /* ВИПРАВЛЕНО: округлюємо до 16 байт, щоб КОЖЕН наступний блок
+       теж був вирівняний. Інакше другий malloc() повертає адресу,
+       кратну 8, і будь-який movaps по ній = #GP. */
+    size = (size + 15u) & ~(size_t)15u;
     Block *curr = heap_list;
     while (curr) {
         if (curr->free && curr->size >= size) {
@@ -111,8 +136,6 @@ int atoi(const char *str) {
         res = res * 10 + str[i] - '0';
     return sign * res;
 }
-
-double fabs(double x) { return x < 0 ? -x : x; }
 
 void* memcpy(void* dest, const void* src, unsigned long n) {
     unsigned char* d = (unsigned char*)dest;
@@ -485,6 +508,9 @@ int fscanf(FILE* stream, const char* format, ...) { return -1; }
 // 6. POSIX I/O
 // ==========================================
 int open(const char *pathname, int flags, ...) {
+    /* ПЕРЕПИСАНО: раніше файл цілком читався у malloc-буфер прямо тут,
+       а write() у файл взагалі не працював (повертав -1). Тепер усе
+       робить ядро через syscalls 16-20, тому файли реально зберігаються. */
     const char* basename = pathname;
     for (const char* p = pathname; *p; p++)
         if (*p == '/' || *p == '\\' || *p == ':') basename = p + 1;
@@ -493,89 +519,34 @@ int open(const char *pathname, int flags, ...) {
     int i = 0;
     for (; basename[i] && i < 63; i++) {
         char c = basename[i];
-        if (c >= 'a' && c <= 'z') c -= 32;
-        upper_name[i] = c;
+        upper_name[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
     }
     upper_name[i] = '\0';
 
-    print(" POSIX OPEN: ", 0x00FFFF00);
-    print(upper_name, 0x00FFFF00);
-    print("\n", 0x00FFFFFF);
-
-    int fd = alloc_fd();
-    if (fd < 0) { print(" ERR: NO FREE FD\n", 0x00FF0000); return -1; }
-
-    unsigned char* temp = (unsigned char*)malloc(64000000);
-    if (!temp) { print(" ERR: MALLOC FAIL\n", 0x00FF0000); return -1; }
-
-    uint64_t actual_size = read_file(upper_name, temp);
-
-    char dbg[64];
-    sprintf(dbg, " FD=%d SIZE=%d\n", fd, (int)actual_size);
-    print(dbg, actual_size > 0 ? 0x0000FF00 : 0x00FF0000);
-
-    if (actual_size == 0) {
-        free(temp);
-        return -1;
-    }
-
-    DOOM_FILE* f = (DOOM_FILE*)malloc(sizeof(DOOM_FILE));
-    if (!f) { free(temp); return -1; }
-    f->data = temp;
-    f->size = (long)actual_size;
-    f->pos  = 0;
-
-    open_files[fd - 3] = f;
-    return fd;
+    return sys_open(upper_name, flags);
 }
 
 int read(int fd, void *buf, unsigned long count) {
-    DOOM_FILE* f = get_file(fd);
-    if (!f) return -1;
-    long remaining = f->size - f->pos;
-    if (remaining <= 0) return 0;
-    unsigned long bytes = (count > (unsigned long)remaining) ? (unsigned long)remaining : count;
-    memcpy(buf, f->data + f->pos, bytes);
-    f->pos += (long)bytes;
-    return (int)bytes;
+    return (int)sys_read_fd(fd, buf, count);
 }
 
 int write(int fd, const void* buf, unsigned long count) {
+    /* fd 1 і 2 лишаються екраном */
     if (fd == 1 || fd == 2) {
         const char* s = (const char*)buf;
         for (unsigned long i = 0; i < count; i++) put_char(s[i], 0x00FFFFFF);
         return (int)count;
     }
-    return -1;
+    return (int)sys_write_fd(fd, buf, count);
 }
 
 long lseek(int fd, long offset, int whence) {
-    DOOM_FILE* f = get_file(fd);
-    if (!f) return -1;
-    if      (whence == SEEK_SET) f->pos = offset;
-    else if (whence == SEEK_CUR) f->pos += offset;
-    else if (whence == SEEK_END) f->pos = f->size + offset;
-    if (f->pos > f->size) f->pos = f->size;
-    if (f->pos < 0)       f->pos = 0;
-    if (offset > 1000000) {
-        char dbg[64];
-        sprintf(dbg, " LSEEK fd=%d off=%d pos=%d\n", fd, (int)offset, (int)f->pos);
-        print(dbg, 0x00888888);
-    }
-    return f->pos;
+    return sys_lseek_fd(fd, offset, whence);
 }
 
 int close(int fd) {
-    char dbg[32];
-    sprintf(dbg, " CLOSE FD=%d\n", fd);
-    print(dbg, 0x00FF8800);
-
-    DOOM_FILE* f = get_file(fd);
-    if (!f) return -1;
-    if (f->data) free(f->data);
-    free(f);
-    open_files[fd - 3] = 0;
-    return 0;
+    if (fd == 1 || fd == 2) return 0;
+    return sys_close_fd(fd);
 }
 
 // ==========================================
@@ -600,10 +571,16 @@ unsigned long fread(void* ptr, unsigned long size, unsigned long count, FILE* st
 
     unsigned long result = (unsigned long)bytes / size;
 
-    char dbg[64];
-    sprintf(dbg, " FREAD fd=%d pos=%ld req=%lu got=%lu\n",
-            fd, f->pos, total, result);
-    print(dbg, 0x00666666);
+#if LIBC_DEBUG
+    {
+        char dbg[64];
+        sprintf(dbg, " FREAD fd=%d pos=%ld req=%lu got=%lu\n",
+                fd, f->pos, total, result);
+        print(dbg, 0x00666666);
+    }
+#else
+    (void)total;
+#endif
 
     return result;
 }
@@ -653,12 +630,8 @@ char* fgets(char* s, int n, FILE* stream) {
 // ВИПРАВЛЕНО: exit() тепер справжній syscall 0, а не нескінченний цикл
 void exit(int status) {
     (void)status;
-    __asm__ volatile (
-        "xor %%rax, %%rax\n"
-        "int $0x80\n"
-        ::: "rax", "memory"
-    );
-    while (1) {}  // якщо ядро чомусь не перервало виконання
+    sys_exit();          /* syscall 0; ядро сюди вже не повернеться */
+    while (1) {}
 }
 
 void* calloc(size_t nitems, size_t size) {
@@ -684,7 +657,6 @@ char* getenv(const char* name)                { return 0; }
 int system(const char* command)               { return 0; }
 int remove(const char* filename)              { return 0; }
 int rename(const char* old, const char* newf) { return 0; }
-double atof(const char* str)                  { return 0.0; }
 int mkdir(const char* pathname, int mode)     { return 0; }
 void* bsearch(const void* key, const void* base, size_t n, size_t size,
               int (*cmp)(const void*, const void*)) { return 0; }

@@ -1,0 +1,317 @@
+
+Discarded input sections
+
+ .reloc         0x0000000000000000        0x0 dll stuff
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+*default*        0x0000000000000000 0xffffffffffffffff
+
+Linker script and memory map
+
+                0x0000000004000000                __image_base__ = 0x4000000
+                0x0000000000000000                __dll__ = 0x0
+                0x0000000004000000                __ImageBase = 0x4000000
+                0x0000000000001000                __section_alignment__ = 0x1000
+                0x0000000000000200                __file_alignment__ = 0x200
+                0x0000000000000004                __major_os_version__ = 0x4
+                0x0000000000000000                __minor_os_version__ = 0x0
+                0x0000000000000000                __major_image_version__ = 0x0
+                0x0000000000000000                __minor_image_version__ = 0x0
+                0x0000000000000005                __major_subsystem_version__ = 0x5
+                0x0000000000000002                __minor_subsystem_version__ = 0x2
+                0x0000000000000003                __subsystem__ = 0x3
+                0x0000000000200000                __size_of_stack_reserve__ = 0x200000
+                0x0000000000001000                __size_of_stack_commit__ = 0x1000
+                0x0000000000100000                __size_of_heap_reserve__ = 0x100000
+                0x0000000000001000                __size_of_heap_commit__ = 0x1000
+                0x0000000000000000                __loader_flags__ = 0x0
+                0x0000000000000160                __dll_characteristics__ = 0x160
+                0x0000000004000000                . = 0x4000000
+
+.image          0x0000000004000000    0x22000
+ *(.text.entry)
+ .text.entry    0x0000000004000000       0x20 libc/entry.o
+                0x0000000004000000                _start
+ *(.text .text.* .text$* .gnu.linkonce.t.*)
+ .text          0x0000000004000020       0x40 libc/entry.o
+                0x0000000004000020                _c_entry
+ *fill*         0x0000000004000060       0x20 
+ .text          0x0000000004000080     0x2040 libc/eugene_libc.o
+                0x0000000004000a30                init_heap
+                0x0000000004000a50                malloc
+                0x0000000004000ad0                free
+                0x0000000004000b30                toupper
+                0x0000000004000b40                tolower
+                0x0000000004000b50                abs
+                0x0000000004000b60                isspace
+                0x0000000004000b80                isdigit
+                0x0000000004000b90                isalpha
+                0x0000000004000ba0                isalnum
+                0x0000000004000bc0                atoi
+                0x0000000004000c80                memcpy
+                0x0000000004000cc0                memset
+                0x0000000004000d10                memcmp
+                0x0000000004000d50                strlen
+                0x0000000004000d80                strcmp
+                0x0000000004000dc0                strncmp
+                0x0000000004000e00                strcasecmp
+                0x0000000004000e90                strncasecmp
+                0x0000000004000f10                strcpy
+                0x0000000004000f40                strncpy
+                0x0000000004000fd0                strcat
+                0x0000000004001020                strncat
+                0x0000000004001090                strchr
+                0x00000000040010c0                strrchr
+                0x0000000004001100                strstr
+                0x0000000004001180                strdup
+                0x0000000004001200                memmove
+                0x0000000004001280                sprintf
+                0x00000000040012b0                snprintf
+                0x00000000040012d0                vsnprintf
+                0x00000000040012e0                vsprintf
+                0x00000000040012f0                printf
+                0x0000000004001350                fprintf
+                0x00000000040013b0                vfprintf
+                0x0000000004001410                sscanf
+                0x00000000040019c0                fscanf
+                0x00000000040019d0                open
+                0x0000000004001a90                read
+                0x0000000004001ab0                write
+                0x0000000004001b30                lseek
+                0x0000000004001b50                close
+                0x0000000004001b80                fopen
+                0x0000000004001ba0                fread
+                0x0000000004001c20                fseek
+                0x0000000004001c50                ftell
+                0x0000000004001c80                fclose
+                0x0000000004001cb0                feof
+                0x0000000004001ce0                ferror
+                0x0000000004001cf0                rewind
+                0x0000000004001d20                fgets
+                0x0000000004001de0                exit
+                0x0000000004001e00                calloc
+                0x0000000004001e90                realloc
+                0x0000000004001fc0                putchar
+                0x0000000004001fe0                puts
+                0x0000000004002010                fflush
+                0x0000000004002020                fwrite
+                0x0000000004002030                getenv
+                0x0000000004002040                system
+                0x0000000004002050                remove
+                0x0000000004002060                rename
+                0x0000000004002070                mkdir
+                0x0000000004002080                bsearch
+                0x0000000004002090                qsort
+ .text          0x00000000040020c0     0x2540 libgui/gui.o
+                0x00000000040020c0                gui_width
+                0x00000000040020d0                gui_height
+                0x00000000040020e0                gui_rect_isect
+                0x0000000004002170                gui_clip_reset
+                0x00000000040021a0                gui_clip_get
+                0x00000000040021c0                gui_clip_push
+                0x0000000004002290                gui_clip_pop
+                0x00000000040022e0                gui_init
+                0x00000000040023e0                gui_invalidate
+                0x00000000040026c0                gui_invalidate_rect
+                0x00000000040026f0                gui_invalidate_all
+                0x0000000004002710                gui_flush
+                0x0000000004002870                gui_fill
+                0x0000000004002990                gui_fill_rect
+                0x00000000040029d0                gui_hline
+                0x00000000040029f0                gui_vline
+                0x0000000004002a10                gui_frame
+                0x0000000004002ae0                gui_line
+                0x0000000004002c00                gui_bevel
+                0x0000000004002d00                gui_bevel2
+                0x0000000004002fb0                gui_dither
+                0x00000000040030d0                gui_focus_rect
+                0x0000000004003220                gui_xor_frame
+                0x0000000004003460                gui_pixel
+                0x00000000040034b0                gui_fb
+                0x00000000040034d0                gui_char_w
+                0x00000000040034f0                gui_text_w
+                0x0000000004003550                gui_text_wn
+                0x00000000040035b0                gui_char
+                0x00000000040036e0                gui_text
+                0x0000000004003760                gui_text_clip
+                0x0000000004003800                gui_text_amp_w
+                0x0000000004003860                gui_text_amp_key
+                0x00000000040038b0                gui_text_amp
+                0x0000000004003a30                gui_ticks
+                0x0000000004003a40                gui_frame_events
+                0x0000000004003a60                gui_poll
+                0x0000000004004100                gui_mouse
+                0x0000000004004130                gui_cursor_set
+                0x0000000004004140                gui_cursor_get
+                0x0000000004004150                gui_cursor_draw
+                0x0000000004004450                gui_cursor_erase
+ .text          0x0000000004004600      0x9c0 libgui/bmp.o
+                0x0000000004004600                bmp_load
+                0x0000000004004aa0                bmp_free
+                0x0000000004004af0                gui_bitmap
+                0x0000000004004c10                gui_bitmap_key
+                0x0000000004004d60                gui_bitmap_fit
+ .text          0x0000000004004fc0     0x4ec0 libgui/win.o
+                0x0000000004005ed0                wm_should_quit
+                0x0000000004005ee0                wm_quit
+                0x0000000004005ef0                wm_set_desktop
+                0x0000000004005f10                wm_set_desktop_proc
+                0x0000000004005f30                wm_invalidate_screen
+                0x00000000040061b0                wnd_invalidate
+                0x00000000040061e0                wnd_client_rect
+                0x00000000040062b0                wnd_invalidate_client
+                0x00000000040062f0                wnd_invalidate_area
+                0x00000000040063f0                wnd_client_size
+                0x0000000004006430                wnd_menubar_rect
+                0x00000000040064a0                wnd_hittest
+                0x00000000040064d0                wm_init
+                0x0000000004006550                wnd_to_top
+                0x00000000040065c0                wnd_next_child
+                0x0000000004006650                wnd_child_by_id
+                0x00000000040066c0                wnd_show
+                0x0000000004006780                wnd_set_title
+                0x00000000040067f0                wnd_enable
+                0x0000000004006830                wnd_active
+                0x0000000004006840                wnd_get_focus
+                0x0000000004006850                wnd_capture
+                0x0000000004006860                wnd_release
+                0x0000000004006870                wnd_set_scroll
+                0x00000000040068f0                wnd_get_scroll
+                0x0000000004006910                wnd_from_point
+                0x0000000004006a90                wnd_send
+                0x0000000004006ac0                wnd_create_child
+                0x0000000004006cd0                wnd_focus
+                0x0000000004006db0                wnd_activate
+                0x0000000004006ef0                wnd_minimize
+                0x0000000004007040                wnd_create
+                0x0000000004007420                wnd_destroy
+                0x0000000004007440                wnd_maximize
+                0x0000000004007750                wnd_move
+                0x0000000004007770                wnd_move_child
+                0x0000000004007880                def_window_proc
+                0x0000000004008d30                wm_pump
+                0x0000000004009ad0                wm_run
+                0x0000000004009b00                wnd_top_count
+                0x0000000004009b50                wnd_top_at
+                0x0000000004009ba0                clip_set
+                0x0000000004009c00                clip_get
+                0x0000000004009c10                clip_len
+                0x0000000004009c20                dlg_end
+                0x0000000004009c70                dlg_modal
+                0x0000000004009e60                wm_set_modal
+ .text          0x0000000004009e80     0x3100 libgui/ctl.o
+                0x000000000400c550                ctl_static
+                0x000000000400c640                ctl_button
+                0x000000000400c730                ctl_edit
+                0x000000000400c8a0                ctl_list
+                0x000000000400c9c0                ctl_set_text
+                0x000000000400ca70                ctl_get_text
+                0x000000000400caa0                ctl_get_check
+                0x000000000400cad0                ctl_set_check
+                0x000000000400cb00                list_set_tabs
+                0x000000000400cb70                list_clear
+                0x000000000400cc10                list_add
+                0x000000000400cd00                list_count
+                0x000000000400cd30                list_item
+                0x000000000400cd70                list_sel
+                0x000000000400cda0                list_set_sel
+                0x000000000400cdf0                edit_set
+                0x000000000400ce10                edit_get
+                0x000000000400ce40                edit_append
+                0x000000000400cef0                edit_len
+                0x000000000400cf20                edit_set_caret
+ .text          0x000000000400cf80     0x2220 libgui/menu.o
+                0x000000000400de50                menu_create
+                0x000000000400de80                menu_free
+                0x000000000400e240                menu_add
+                0x000000000400e2e0                menu_add_sub
+                0x000000000400e380                menu_sep
+                0x000000000400e3c0                menu_check
+                0x000000000400e400                menu_enable
+                0x000000000400e440                wnd_set_menu
+                0x000000000400e460                menu_popup
+                0x000000000400e490                menu_bar_draw
+                0x000000000400e610                menu_bar_click
+                0x000000000400e780                menu_bar_key
+                0x000000000400e880                dlg_create
+                0x000000000400e890                msg_box
+                0x000000000400ecc0                dlg_open_file
+                0x000000000400efd0                dlg_input
+ *fill*         0x000000000400f1a0       0x20 
+ .text          0x000000000400f1c0     0x6dc0 userland/shell.o
+                0x0000000004015ca0                gui_main
+                0x0000000004015f80                . = ALIGN (0x10)
+ *(.rdata .rdata.* .rdata$*)
+ .rdata$.refptr.__bss_end
+                0x0000000004015f80       0x10 libc/entry.o
+                0x0000000004015f80                .refptr.__bss_end
+ .rdata$.refptr.__bss_start
+                0x0000000004015f90       0x10 libc/entry.o
+                0x0000000004015f90                .refptr.__bss_start
+ .rdata         0x0000000004015fa0      0x220 libc/eugene_libc.o
+ .rdata         0x00000000040161c0      0x5e0 libgui/gui.o
+ .rdata         0x00000000040167a0      0x140 libgui/win.o
+ .rdata         0x00000000040168e0      0x330 libgui/ctl.o
+ .rdata         0x0000000004016c10       0x70 libgui/menu.o
+ .rdata         0x0000000004016c80      0xc80 userland/shell.o
+ *(.rodata .rodata.* .gnu.linkonce.r.*)
+                0x0000000004017900                . = ALIGN (0x10)
+ *(.data .data.* .data$* .gnu.linkonce.d.*)
+ .data          0x0000000004017900        0x0 libc/entry.o
+ .data          0x0000000004017900        0x0 libc/eugene_libc.o
+ .data          0x0000000004017900       0x10 libgui/gui.o
+ .data          0x0000000004017910        0x0 libgui/bmp.o
+ .data          0x0000000004017910       0x10 libgui/win.o
+ .data          0x0000000004017920        0x0 libgui/ctl.o
+ .data          0x0000000004017920        0x0 libgui/menu.o
+ .data          0x0000000004017920       0x10 userland/shell.o
+ *(.got .got.plt)
+                0x0000000004017930                . = ALIGN (0x10)
+                0x0000000004017930                __bss_start = .
+ *(.bss .bss.* .bss$* .gnu.linkonce.b.*)
+ .bss           0x0000000004017930        0x0 libc/entry.o
+ .bss           0x0000000004017930        0x0 libc/eugene_libc.o
+ *fill*         0x0000000004017930       0x10 
+ .bss           0x0000000004017940      0xc40 libgui/gui.o
+ .bss           0x0000000004018580     0x2000 libgui/bmp.o
+ .bss           0x000000000401a580     0x63e0 libgui/win.o
+ .bss           0x0000000004020960        0x0 libgui/ctl.o
+ .bss           0x0000000004020960        0x0 libgui/menu.o
+ .bss           0x0000000004020960     0x16a0 userland/shell.o
+ *(COMMON)
+                0x0000000004022000                . = ALIGN (0x10)
+                0x0000000004022000                __bss_end = .
+                0x0000000004022000                __image_end = .
+
+/DISCARD/
+ *(.pdata)
+ *(.xdata)
+ *(.idata .idata.*)
+ *(.edata)
+ *(.CRT .CRT$*)
+ *(.tls .tls$*)
+ *(.rsrc)
+ *(.reloc)
+ *(.buildid)
+ *(.note.gnu.property)
+ *(.note.GNU-stack)
+ *(.note.*)
+ *(.eh_frame)
+ *(.eh_frame_hdr)
+ *(.gcc_except_table)
+ *(.comment)
+ *(.debug*)
+ *(.drectve)
+                0x0000000000000001                __ld_assert_entry = ASSERT ((_start == 0x4000000), FATAL: _start ne na 0x4000000. Perevir poryadok .o faylin ta orphan-sekcii.)
+LOAD libc/entry.o
+LOAD libc/eugene_libc.o
+LOAD libgui/gui.o
+LOAD libgui/bmp.o
+LOAD libgui/win.o
+LOAD libgui/ctl.o
+LOAD libgui/menu.o
+LOAD userland/shell.o
+OUTPUT(userland\shell.tmp pei-x86-64)
+LOAD dll stuff
