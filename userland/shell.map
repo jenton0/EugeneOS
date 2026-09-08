@@ -30,7 +30,7 @@ Linker script and memory map
                 0x0000000000000160                __dll_characteristics__ = 0x160
                 0x0000000004000000                . = 0x4000000
 
-.image          0x0000000004000000    0x22400
+.image          0x0000000004000000    0x22a00
  *(.text.entry)
  .text.entry    0x0000000004000000       0x20 libc/entry.o
                 0x0000000004000000                _start
@@ -240,50 +240,50 @@ Linker script and memory map
                 0x000000000400ecc0                dlg_open_file
                 0x000000000400efd0                dlg_input
  *fill*         0x000000000400f1a0       0x20 
- .text          0x000000000400f1c0     0x7140 userland/shell.o
-                0x0000000004016030                gui_main
-                0x0000000004016300                . = ALIGN (0x10)
+ .text          0x000000000400f1c0     0x7640 userland/shell.o
+                0x0000000004016520                gui_main
+                0x0000000004016800                . = ALIGN (0x10)
  *(.rdata .rdata.* .rdata$*)
  .rdata$.refptr.__bss_end
-                0x0000000004016300       0x10 libc/entry.o
-                0x0000000004016300                .refptr.__bss_end
+                0x0000000004016800       0x10 libc/entry.o
+                0x0000000004016800                .refptr.__bss_end
  .rdata$.refptr.__bss_start
-                0x0000000004016310       0x10 libc/entry.o
-                0x0000000004016310                .refptr.__bss_start
- .rdata         0x0000000004016320      0x220 libc/eugene_libc.o
- .rdata         0x0000000004016540      0x5e0 libgui/gui.o
- .rdata         0x0000000004016b20      0x140 libgui/win.o
- .rdata         0x0000000004016c60      0x330 libgui/ctl.o
- .rdata         0x0000000004016f90       0x70 libgui/menu.o
- .rdata         0x0000000004017000      0xc60 userland/shell.o
+                0x0000000004016810       0x10 libc/entry.o
+                0x0000000004016810                .refptr.__bss_start
+ .rdata         0x0000000004016820      0x220 libc/eugene_libc.o
+ .rdata         0x0000000004016a40      0x5e0 libgui/gui.o
+ .rdata         0x0000000004017020      0x140 libgui/win.o
+ .rdata         0x0000000004017160      0x330 libgui/ctl.o
+ .rdata         0x0000000004017490       0x70 libgui/menu.o
+ .rdata         0x0000000004017500      0xd80 userland/shell.o
  *(.rodata .rodata.* .gnu.linkonce.r.*)
-                0x0000000004017c60                . = ALIGN (0x10)
+                0x0000000004018280                . = ALIGN (0x10)
  *(.data .data.* .data$* .gnu.linkonce.d.*)
- .data          0x0000000004017c60        0x0 libc/entry.o
- .data          0x0000000004017c60        0x0 libc/eugene_libc.o
- .data          0x0000000004017c60       0x10 libgui/gui.o
- .data          0x0000000004017c70        0x0 libgui/bmp.o
- .data          0x0000000004017c70       0x10 libgui/win.o
- .data          0x0000000004017c80        0x0 libgui/ctl.o
- .data          0x0000000004017c80        0x0 libgui/menu.o
- .data          0x0000000004017c80       0x10 userland/shell.o
+ .data          0x0000000004018280        0x0 libc/entry.o
+ .data          0x0000000004018280        0x0 libc/eugene_libc.o
+ .data          0x0000000004018280       0x10 libgui/gui.o
+ .data          0x0000000004018290        0x0 libgui/bmp.o
+ .data          0x0000000004018290       0x10 libgui/win.o
+ .data          0x00000000040182a0        0x0 libgui/ctl.o
+ .data          0x00000000040182a0        0x0 libgui/menu.o
+ .data          0x00000000040182a0       0x10 userland/shell.o
  *(.got .got.plt)
-                0x0000000004017c90                . = ALIGN (0x10)
-                0x0000000004017c90                __bss_start = .
+                0x00000000040182b0                . = ALIGN (0x10)
+                0x00000000040182b0                __bss_start = .
  *(.bss .bss.* .bss$* .gnu.linkonce.b.*)
- .bss           0x0000000004017c90        0x0 libc/entry.o
- .bss           0x0000000004017c90        0x0 libc/eugene_libc.o
- *fill*         0x0000000004017c90       0x10 
- .bss           0x0000000004017ca0      0xc40 libgui/gui.o
- .bss           0x00000000040188e0     0x2000 libgui/bmp.o
- .bss           0x000000000401a8e0     0x63e0 libgui/win.o
- .bss           0x0000000004020cc0        0x0 libgui/ctl.o
- .bss           0x0000000004020cc0        0x0 libgui/menu.o
- .bss           0x0000000004020cc0     0x16c0 userland/shell.o
+ .bss           0x00000000040182b0        0x0 libc/entry.o
+ .bss           0x00000000040182b0        0x0 libc/eugene_libc.o
+ *fill*         0x00000000040182b0       0x10 
+ .bss           0x00000000040182c0      0xc40 libgui/gui.o
+ .bss           0x0000000004018f00     0x2000 libgui/bmp.o
+ .bss           0x000000000401af00     0x63e0 libgui/win.o
+ .bss           0x00000000040212e0        0x0 libgui/ctl.o
+ .bss           0x00000000040212e0        0x0 libgui/menu.o
+ .bss           0x00000000040212e0     0x16c0 userland/shell.o
  *(COMMON)
-                0x0000000004022380                . = ALIGN (0x10)
-                0x0000000004022380                __bss_end = .
-                0x0000000004022380                __image_end = .
+                0x00000000040229a0                . = ALIGN (0x10)
+                0x00000000040229a0                __bss_end = .
+                0x00000000040229a0                __image_end = .
 
 /DISCARD/
  *(.pdata)

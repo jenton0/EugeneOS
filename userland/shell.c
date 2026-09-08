@@ -79,6 +79,7 @@ static Window* g_files   = 0;
 /* Вікна відкриваються з кількох місць, тому оголошуємо наперед */
 static void open_console(void);
 static void open_editor(void);
+static void web_open(const char* args);
 static void open_files(void);
 static void task_list(void);
 static void progman_scan(void);
@@ -229,6 +230,8 @@ static void console_exec(const char* cmd) {
         log_add("HELP  CLS  VER  TIME  LIST  EXIT");
         log_add("CD <dir>     увійти в каталог, CD .. вгору");
         log_add("RUN <file>   запустити програму");
+        log_add("WEB <host>   відкрити сторінку в Блокноті");
+        log_add("решта команд іде в ядро: MEMMAP, TASKS, PING, GET...");
         log_add("ECHO <text>  надрукувати рядок");
     }
     else if (strcasecmp(cmd, "cls") == 0) {
@@ -289,14 +292,40 @@ static void console_exec(const char* cmd) {
     else if (strncasecmp(cmd, "run ", 4) == 0) {
         open_app_window(cmd + 4);
     }
+    else if (strncasecmp(cmd, "web ", 4) == 0) {
+        web_open(cmd + 4);
+    }
     else if (strcasecmp(cmd, "exit") == 0) {
         wm_quit();
     }
     else {
-        msg[0] = 0;
-        sappend(msg, sizeof(msg), "Unknown command: ");
-        sappend(msg, sizeof(msg), cmd);
-        log_add(msg);
+        /* Своєї команди немає - питаємо ядро. Там їх тридцять вісім,
+           від MEMMAP до GET, і переписувати їх сюди не було б чим
+           виправдатися: вивід воно тепер віддає текстом. */
+        int n = kernel_cmd(cmd);
+        const AppText* t = app_text();
+        if (n <= 0 || !t || !t->text) {
+            msg[0] = 0;
+            sappend(msg, sizeof(msg), "Unknown command: ");
+            sappend(msg, sizeof(msg), cmd);
+            log_add(msg);
+        } else {
+            /* Розкладаємо вивід на рядки: журнал приймає їх по одному. */
+            const char* s = t->text;
+            int len = (int)t->len;
+            char line[128];
+            int k = 0;
+            for (int i = 0; i < len; i++) {
+                char ch = s[i];
+                if (ch == '\r') continue;
+                if (ch != '\n' && k < (int)sizeof(line) - 1) { line[k++] = ch; continue; }
+                line[k] = 0;
+                log_add(line);
+                k = 0;
+                if (ch != '\n') line[k++] = ch;
+            }
+            if (k > 0) { line[k] = 0; log_add(line); }
+        }
     }
 }
 
@@ -384,6 +413,70 @@ static void editor_open(const char* name) {
     while (name[i] && i < FNAME_CAP - 1) { g_ed_file[i] = name[i]; i++; }
     g_ed_file[i] = 0;
     editor_title();
+}
+
+/* Сторінку показуємо в Блокноті. Робити для неї окреме вікно означало
+   б написати ще раз те, що там уже є: прокрутку, виділення, буфер
+   обміну. Заразом сторінку можна одразу зберегти на диск.
+
+   Ядро віддає текст тим самим шляхом, що й друк програми у вікні
+   (syscall 46) - окремого механізму для цього не заводили. */
+static void web_open(const char* args) {
+    if (!args || args[0] == 0) {
+        log_add("WEB <host> [path]");
+        return;
+    }
+    log_add("Fetching...");
+
+    int n = web_fetch(args);
+    const AppText* t = app_text();
+    if (!t || !t->text) { log_add("The kernel returned nothing."); return; }
+
+    if (n <= 0) {
+        /* Нуль означає невдачу, але причина лежить у тому ж буфері -
+           показуємо саме її, а не власний здогад. */
+        char line[128];
+        int k = 0;
+        for (uint32_t i = 0; i < t->len; i++) {
+            char ch = t->text[i];
+            if (ch == '\r') continue;
+            if (ch != '\n' && k < (int)sizeof(line) - 1) { line[k++] = ch; continue; }
+            line[k] = 0;
+            if (line[0]) log_add(line);
+            k = 0;
+        }
+        if (k > 0) { line[k] = 0; log_add(line); }
+        return;
+    }
+
+    char* buf = (char*)malloc((unsigned long)n + 1);
+    if (!buf) { log_add("Not enough memory for the page."); return; }
+    for (int i = 0; i < n; i++) buf[i] = t->text[i];
+    buf[n] = 0;
+
+    open_editor();
+    if (g_editor) {
+        Window* ed = wnd_child_by_id(g_editor, IDC_TEXT);
+        if (ed) edit_set(ed, buf);
+        /* Ім'я даємо справжнє: тоді збереження по F2 не питатиме його
+           щоразу, а сторінка ляже на диск як звичайний текст. */
+        int i = 0;
+        const char* nm = "PAGE.TXT";
+        while (nm[i] && i < FNAME_CAP - 1) { g_ed_file[i] = nm[i]; i++; }
+        g_ed_file[i] = 0;
+        editor_title();
+        wnd_activate(g_editor);
+    }
+    free(buf);
+
+    char done[64];
+    done[0] = 0;
+    sappend(done, sizeof(done), "Page opened in Notepad, ");
+    char num[16];
+    num_to_dec(n, num);
+    sappend(done, sizeof(done), num);
+    sappend(done, sizeof(done), " bytes.");
+    log_add(done);
 }
 
 static void editor_save(void) {

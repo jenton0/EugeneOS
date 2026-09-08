@@ -499,6 +499,12 @@ ExecuteCommand:
     jz      .run_nslookup
 
     lea     rsi, [CmdBuffer]
+    lea     rdi, [CmdWeb]
+    call    StrPrefix
+    test    rax, rax
+    jz      .run_web
+
+    lea     rsi, [CmdBuffer]
     lea     rdi, [CmdHttpGet]
     call    StrPrefix
     test    rax, rax
@@ -2498,6 +2504,13 @@ ExecuteCommand:
     call    NsLookupCommand
     jmp     .finish
 
+; Сторінку показує ТОЙ САМИЙ переглядач, що й текстові файли: він уже
+; вміє прокрутку й вихід по ESC, тож писати це вдруге немає підстав.
+.run_web:
+    call    WebCommand
+    jc      .finish
+    jmp     .view_file
+
 .run_httpget:
     call    HttpGetCommand
     jmp     .finish
@@ -2535,6 +2548,8 @@ ExecuteCommand:
 ; 4. СИСТЕМНІ УТИЛІТИ 
 ; ==========================================================
 PrintPrompt:
+    cmp     byte [ConsoleToBuf], 0
+    jne     .pp_skip        ; у буфері запрошення ні до чого
     mov     rcx, [CursorX]
     mov     rdx, [CursorY]
     lea     r8,  [CurrentPath]
@@ -2560,6 +2575,7 @@ PrintPrompt:
     add     qword [CursorX], 9          ; у DOS після '>' один пробіл
     
     call    DrawCursor                  
+.pp_skip:
     ret
 
 AppendPath:
@@ -2619,6 +2635,14 @@ RemoveLastPath:
     ret
 
 NewLine:
+    cmp     byte [ConsoleToBuf], 0
+    je      .nl_screen
+    push    rax
+    mov     al, 10
+    call    AppTextPutChar
+    pop     rax
+    ret
+.nl_screen:
     ; ВИПРАВЛЕНО: зберігаємо RAX/R10
     push    rax
     push    r10
@@ -5002,6 +5026,18 @@ ClearScreen:
     ret
 
 DrawString:
+    ; Коли консоль перенаправлено, увесь вивід команд іде в буфер.
+    ; Перехоплення саме тут тому, що ЦЕ єдина точка, через яку
+    ; друкують усі тридцять вісім команд - жодну не доведеться
+    ; переписувати.
+    cmp     byte [ConsoleToBuf], 0
+    je      .ds_screen
+    push    rsi
+    mov     rsi, r8
+    call    AppTextPutStr
+    pop     rsi
+    ret
+.ds_screen:
     push    rsi
     push    rax
     push    rbx
@@ -6046,6 +6082,7 @@ CmdNsLookup     db 'NSLOOKUP ', 0
 CmdSetDns       db 'SETDNS ', 0
 CmdTcp          db 'TCP ', 0
 CmdHttpGet      db 'GET ', 0
+CmdWeb          db 'WEB ', 0
 CmdCopy         db 'COPY ', 0
 CmdInstall      db 'INSTALL ', 0
 CmdDhcp         db 'DHCP', 0
@@ -6424,6 +6461,19 @@ HttpTxtVer      db ' HTTP/1.0', 13, 10, 'Host: ', 0
 HttpTxtTail     db 13, 10, 'Connection: close', 13, 10, 13, 10, 0
 MsgHttpResolved db 'RESOLVED TO:', 0
 MsgHttpDnsFail  db 'COULD NOT RESOLVE THAT NAME', 0
+MsgWebUsage     db 'USAGE: WEB <HOST OR IP> [PATH]', 0
+MsgWebEmpty     db 'THE SERVER SENT NOTHING', 0
+MsgWebName      db 'WEB PAGE   '
+MsgWebRedir     db 'REDIRECTED TO', 0
+MsgWebHttps     db 'THIS SITE WANTS HTTPS - WE CANNOT DO TLS YET', 0
+MsgWebLoops     db 'TOO MANY REDIRECTS', 0
+MsgWebBadLoc    db 'CANNOT UNDERSTAND THE REDIRECT ADDRESS', 0
+HdrLocation     db 'location:', 0
+WebSchemeHttp   db 'http://', 0
+WebSchemeHttps  db 'https://', 0
+align 8
+WebHost         rb 128          ; хост, який може змінитися перенаправленням
+WebHops         db 0            ; скільки стрибків лишилось
 MsgDnsStage     db 'DNS STOPPED AT STAGE:', 0
 MsgDnsTx        db 'FRAME SENT:', 0
 align 8
@@ -6566,6 +6616,15 @@ align 8
 ; Заголовок буфера тексту. Оболонка бере його адресу один раз
 ; (syscall 46) і далі читає поля прямо з пам'яті: вона спільна, тож
 ; питати ядро на кожному кадрі немає потреби.
+; Ці команди забирають екран під власний цикл клавіш або запускають
+; програму - з вікна оболонки їх кликати не можна.
+KCmdDenied:
+    db 'run ',0, 'open ',0, 'edit ',0, 'web ',0, 'win',0
+    db 'reboot',0, 'exit',0, 'cls',0
+    db 0
+MsgKCmdDenied   db 'THAT COMMAND NEEDS THE KERNEL CONSOLE', 0
+ConsoleToBuf    db 0            ; 1 = вивід команд іде в буфер, а не на екран
+align 8
 AppTextHdr:
     dq  AppTextBase             ; +0  де лежить текст
     dd  0                       ; +8  скільки байтів
@@ -10539,6 +10598,432 @@ TcpCommand:
 ; рядок збирається шматками, і термінатор ставить той, хто закінчив.
 ; RSI не псуємо.
 ; ----------------------------------------------------------
+; ==========================================================
+; HTML -> ТЕКСТ
+;
+; Веб 1.0 і не більше: теги викидаємо, від блокових лишаємо перенос
+; рядка, сутності розкриваємо, пробіли стискаємо. Ні дерева, ні CSS,
+; ні розкладки - показ бере на себе наявний переглядач тексту, той
+; самий, що відкриває .TXT.
+;
+; Переглядач ламає рядки тільки по нулю рядка, тому переносимо самі:
+; запам'ятовуємо, де був останній пробіл, і коли рядок переріс межу -
+; перетворюємо той пробіл на перенос. Так слово не ріжеться навпіл.
+; ==========================================================
+
+HTML_WRAP       equ 100         ; символів у рядку
+
+; Блокові теги: після них починається новий рядок.
+HtmlBlockTags:
+    db 'br',0, 'div',0, 'li',0, 'tr',0, 'td',0, 'dt',0, 'dd',0
+    db 'option',0, 'body',0, 'section',0, 'article',0, 'nav',0, 'header',0
+    db 'footer',0, 'main',0, 'aside',0, 'figure',0, 'figcaption',0, 'label',0
+    db 0
+
+; Ці ще й лишають порожній рядок навколо себе.
+HtmlGapTags:
+    db 'p',0, 'h1',0, 'h2',0, 'h3',0, 'h4',0, 'h5',0, 'h6',0
+    db 'hr',0, 'ul',0, 'ol',0, 'dl',0, 'table',0, 'blockquote',0
+    db 'pre',0, 'form',0, 'title',0
+    db 0
+
+; Сутності, які справді трапляються. Решту просто викидаємо.
+HtmlEntNames:
+    db 'amp',0,  'lt',0,   'gt',0,   'quot',0, 'apos',0
+    db 'nbsp',0, 'mdash',0,'ndash',0,'hellip',0,'copy',0
+    db 0
+HtmlEntChars:
+    db '&', '<', '>', '"', 39, ' ', '-', '-', '.', 'C'
+
+; Ці викидаємо разом із вмістом: інакше на екран полізе код.
+HtmlSkipTags:
+    db 'script',0, 'style',0
+    db 0
+
+HtmlTagName     rb 16          ; ім'я поточного тега, малими літерами
+
+; ----------------------------------------------------------
+; HtmlNameEq - чи збігається HtmlTagName з рядком RDI.
+;   -> ZF=1, якщо так. RDI не псуємо.
+; ----------------------------------------------------------
+HtmlNameEq:
+    push    rsi
+    push    rdi
+    push    rax
+    lea     rsi, [HtmlTagName]
+.hne_loop:
+    mov     al, [rsi]
+    cmp     al, [rdi]
+    jne     .hne_no
+    test    al, al
+    jz      .hne_yes
+    inc     rsi
+    inc     rdi
+    jmp     .hne_loop
+.hne_yes:
+    xor     al, al              ; ZF=1
+    jmp     .hne_done
+.hne_no:
+    or      al, 1               ; ZF=0
+    test    al, al
+.hne_done:
+    pop     rax
+    pop     rdi
+    pop     rsi
+    ret
+
+; ----------------------------------------------------------
+; HtmlInList - чи є HtmlTagName у переліку RDI (рядки через нуль,
+; порожній рядок - кінець).
+;   -> CF=1, якщо знайшли
+; ----------------------------------------------------------
+HtmlInList:
+    push    rdi
+    push    rax
+.hil_next:
+    cmp     byte [rdi], 0
+    je      .hil_no
+    call    HtmlNameEq
+    je      .hil_yes
+    ; пропускаємо цей рядок разом із нулем
+.hil_skip:
+    cmp     byte [rdi], 0
+    je      .hil_step
+    inc     rdi
+    jmp     .hil_skip
+.hil_step:
+    inc     rdi
+    jmp     .hil_next
+.hil_yes:
+    pop     rax
+    pop     rdi
+    stc
+    ret
+.hil_no:
+    pop     rax
+    pop     rdi
+    clc
+    ret
+
+; ----------------------------------------------------------
+; HtmlToText - перетворити HTML на плаский текст.
+;   RSI = вхід, ECX = його довжина
+;   RDI = куди писати
+;   -> ECX = скільки вийшло
+;
+; Регістри в роботі:
+;   R8  = кінець входу     R9  = початок виходу
+;   R10 = скільки переносів підряд уже стоїть (стеля - два)
+;   R11 = поточна колонка  R12 = зсув останнього пробілу, -1 якщо нема
+; ----------------------------------------------------------
+HtmlToText:
+    push    rax
+    push    rbx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+    push    r12
+    push    r13
+
+    mov     r8, rsi
+    add     r8, rcx                 ; кінець входу
+    mov     r9, rdi                 ; початок виходу
+    mov     r10, 2                  ; на початку переноси зайві
+    xor     r11, r11
+    mov     r12, -1
+
+.htt_loop:
+    cmp     rsi, r8
+    jae     .htt_done
+
+    mov     al, [rsi]
+    cmp     al, 60                  ; '<'
+    je      .htt_tag
+    cmp     al, 38                  ; '&'
+    je      .htt_entity
+
+    inc     rsi
+    cmp     al, 32
+    jbe     .htt_space              ; пробіл, табуляція, перенос - усе одно
+    cmp     al, 127
+    jae     .htt_loop               ; поза нашим шрифтом
+    jmp     .htt_put
+
+; ---------- пробіли ----------
+;
+; У HTML їх підряд буває скільки завгодно, а на екрані має бути один.
+.htt_space:
+    cmp     r10, 0
+    jne     .htt_loop               ; одразу після переносу пробіл зайвий
+    cmp     r11, 0
+    je      .htt_loop               ; і на початку рядка теж
+    cmp     byte [rdi - 1], 32
+    je      .htt_loop               ; один уже стоїть, другого не треба
+    mov     r12, rdi
+    sub     r12, r9                 ; запам'ятали, де стоїть цей пробіл
+    mov     byte [rdi], 32
+    inc     rdi
+    inc     r11
+    jmp     .htt_wrapchk
+
+.htt_put:
+    mov     [rdi], al
+    inc     rdi
+    inc     r11
+    xor     r10, r10
+
+.htt_wrapchk:
+    cmp     r11, HTML_WRAP
+    jb      .htt_loop
+    cmp     r12, 0
+    jl      .htt_loop               ; жодного пробілу - хай буде довгий
+    mov     rbx, r9
+    add     rbx, r12
+    mov     byte [rbx], 10          ; той пробіл стає переносом
+    mov     r11, rdi
+    sub     r11, rbx
+    dec     r11                     ; стільки вже в новому рядку
+    mov     r12, -1
+    jmp     .htt_loop
+
+; ---------- сутність ----------
+.htt_entity:
+    inc     rsi                     ; за '&'
+    lea     rbx, [HtmlTagName]
+    xor     rdx, rdx
+.htt_ent_ch:
+    cmp     rsi, r8
+    jae     .htt_ent_give
+    mov     al, [rsi]
+    cmp     al, 59                  ; ';'
+    je      .htt_ent_end
+    cmp     rdx, 12
+    jae     .htt_ent_give           ; надто довге - це був не початок
+    cmp     al, 65                  ; 'A'
+    jb      .htt_ent_store
+    cmp     al, 90                  ; 'Z'
+    ja      .htt_ent_store
+    add     al, 32
+.htt_ent_store:
+    mov     [rbx + rdx], al
+    inc     rdx
+    inc     rsi
+    jmp     .htt_ent_ch
+.htt_ent_end:
+    inc     rsi                     ; за ';'
+    mov     byte [rbx + rdx], 0
+
+    cmp     byte [rbx], 35          ; '#'
+    je      .htt_ent_num
+
+    push    rdi
+    lea     rdi, [HtmlEntNames]
+    xor     r13, r13
+.htt_ent_scan:
+    cmp     byte [rdi], 0
+    je      .htt_ent_unknown
+    call    HtmlNameEq
+    je      .htt_ent_found
+.htt_ent_skip:
+    cmp     byte [rdi], 0
+    je      .htt_ent_step
+    inc     rdi
+    jmp     .htt_ent_skip
+.htt_ent_step:
+    inc     rdi
+    inc     r13
+    jmp     .htt_ent_scan
+.htt_ent_found:
+    lea     rbx, [HtmlEntChars]
+    mov     al, [rbx + r13]
+    pop     rdi
+    jmp     .htt_put
+.htt_ent_unknown:
+    pop     rdi
+    jmp     .htt_loop               ; невідому просто викидаємо
+.htt_ent_num:
+    ; Свого шрифту поза ASCII немає, тому будь-яку числову замінюємо
+    ; крапкою: краще позначка, ніж діра в реченні.
+    mov     al, 46                  ; '.'
+    jmp     .htt_put
+.htt_ent_give:
+    mov     al, 38                  ; це був не початок сутності
+    jmp     .htt_put
+
+; ---------- тег ----------
+.htt_tag:
+    inc     rsi                     ; за '<'
+    xor     r13, r13                ; чи закривний
+    cmp     rsi, r8
+    jae     .htt_done
+    cmp     byte [rsi], 47          ; '/'
+    jne     .htt_tag_name
+    inc     rsi
+    mov     r13, 1
+.htt_tag_name:
+    lea     rbx, [HtmlTagName]
+    xor     rdx, rdx
+.htt_tag_ch:
+    cmp     rsi, r8
+    jae     .htt_tag_named
+    mov     al, [rsi]
+    cmp     al, 65                  ; 'A'
+    jb      .htt_tag_chk
+    cmp     al, 90                  ; 'Z'
+    ja      .htt_tag_chk
+    add     al, 32
+.htt_tag_chk:
+    cmp     al, 97                  ; 'a'
+    jb      .htt_tag_named
+    cmp     al, 122                 ; 'z'
+    ja      .htt_tag_named
+    cmp     rdx, 14
+    jae     .htt_tag_named
+    mov     [rbx + rdx], al
+    inc     rdx
+    inc     rsi
+    jmp     .htt_tag_ch
+.htt_tag_named:
+    mov     byte [rbx + rdx], 0
+
+    ; script і style викидаємо разом із вмістом: інакше на екран
+    ; полізе код, якому там не місце.
+    push    rdi
+    lea     rdi, [HtmlSkipTags]
+    call    HtmlInList
+    pop     rdi
+    jnc     .htt_tag_kind
+    test    r13, r13
+    jnz     .htt_tag_plain          ; закривний - просто дочитуємо
+    call    HtmlSkipBlock
+    jmp     .htt_loop
+
+.htt_tag_kind:
+    push    rdi
+    lea     rdi, [HtmlGapTags]
+    call    HtmlInList
+    pop     rdi
+    jc      .htt_gap
+    push    rdi
+    lea     rdi, [HtmlBlockTags]
+    call    HtmlInList
+    pop     rdi
+    jc      .htt_break
+
+.htt_tag_plain:
+    call    HtmlSkipToGt
+    jmp     .htt_loop
+
+.htt_gap:
+    call    HtmlSkipToGt
+    call    .htt_nl
+    call    .htt_nl
+    jmp     .htt_loop
+.htt_break:
+    call    HtmlSkipToGt
+    call    .htt_nl
+    jmp     .htt_loop
+
+; Перенос рядка, але не більше двох підряд: інакше порожні блоки
+; розтягнули б сторінку на екрани пустоти.
+.htt_nl:
+    cmp     r10, 2
+    jae     .htt_nl_done
+    mov     byte [rdi], 10
+    inc     rdi
+    inc     r10
+    xor     r11, r11
+    mov     r12, -1
+.htt_nl_done:
+    ret
+
+.htt_done:
+    mov     rcx, rdi
+    sub     rcx, r9                 ; скільки вийшло
+
+    pop     r13
+    pop     r12
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rbx
+    pop     rax
+    ret
+
+; ----------------------------------------------------------
+; HtmlSkipToGt - дочитати вхід до '>' включно.
+; RSI і R8 ті самі, що в HtmlToText.
+; ----------------------------------------------------------
+HtmlSkipToGt:
+    push    rax
+.hsg_loop:
+    cmp     rsi, r8
+    jae     .hsg_done
+    mov     al, [rsi]
+    inc     rsi
+    cmp     al, 62                  ; '>'
+    jne     .hsg_loop
+.hsg_done:
+    pop     rax
+    ret
+
+; ----------------------------------------------------------
+; HtmlSkipBlock - пропустити все до закривного тега з тим самим
+; іменем. Ім'я лежить у HtmlTagName.
+; ----------------------------------------------------------
+HtmlSkipBlock:
+    push    rax
+    push    rbx
+    push    rdx
+    call    HtmlSkipToGt            ; спершу закриваємо відкривний
+.hsb_loop:
+    cmp     rsi, r8
+    jae     .hsb_done
+    mov     al, [rsi]
+    inc     rsi
+    cmp     al, 60                  ; '<'
+    jne     .hsb_loop
+    cmp     rsi, r8
+    jae     .hsb_done
+    cmp     byte [rsi], 47          ; '/'
+    jne     .hsb_loop
+    inc     rsi
+    lea     rbx, [HtmlTagName]
+    xor     rdx, rdx
+.hsb_cmp:
+    mov     al, [rbx + rdx]
+    test    al, al
+    jz      .hsb_hit
+    cmp     rsi, r8
+    jae     .hsb_done
+    mov     ah, [rsi]
+    cmp     ah, 65
+    jb      .hsb_nolow
+    cmp     ah, 90
+    ja      .hsb_nolow
+    add     ah, 32
+.hsb_nolow:
+    cmp     al, ah
+    jne     .hsb_loop
+    inc     rsi
+    inc     rdx
+    jmp     .hsb_cmp
+.hsb_hit:
+    call    HtmlSkipToGt
+.hsb_done:
+    pop     rdx
+    pop     rbx
+    pop     rax
+    ret
+
 StrAppendZ:
     push    rax
     push    rsi
@@ -10815,6 +11300,589 @@ HttpGetCommand:
     call    NewLine
 
 .hg_done:
+    pop     r13
+    pop     r12
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; ==========================================================
+; РОЗБІР ВІДПОВІДІ HTTP
+;
+; Рівно стільки, скільки треба для перенаправлень: код відповіді та
+; один заголовок. Повного розбору заголовків тут немає й не буде -
+; сторінку показує переглядач, а не ми.
+; ==========================================================
+
+; ----------------------------------------------------------
+; HttpStatus - код відповіді з першого рядка "HTTP/1.x NNN ...".
+;   RSI = початок відповіді, ECX = її довжина
+;   -> EAX = код, або 0 якщо рядок не схожий на статус
+; ----------------------------------------------------------
+HttpStatus:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+
+    xor     eax, eax
+    mov     rbx, rsi
+    add     rbx, rcx                ; кінець
+
+    ; до першого пробілу
+.hs_sp:
+    cmp     rsi, rbx
+    jae     .hs_done
+    mov     dl, [rsi]
+    cmp     dl, 13
+    je      .hs_done                ; рядок скінчився, а пробілу не було
+    inc     rsi
+    cmp     dl, 32
+    jne     .hs_sp
+
+    ; три цифри
+    xor     edx, edx
+.hs_num:
+    cmp     rsi, rbx
+    jae     .hs_done
+    mov     dl, [rsi]
+    cmp     dl, 48                  ; '0'
+    jb      .hs_done
+    cmp     dl, 57                  ; '9'
+    ja      .hs_done
+    sub     dl, 48
+    imul    eax, eax, 10
+    movzx   edx, dl
+    add     eax, edx
+    inc     rsi
+    cmp     eax, 999
+    jbe     .hs_num
+
+.hs_done:
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    ret
+
+; ----------------------------------------------------------
+; HttpFindHeader - знайти заголовок і повернути його значення.
+;   RSI = відповідь, ECX = довжина
+;   RDI = ім'я МАЛИМИ літерами з двокрапкою ("location:")
+;   -> CF=0: RSI = початок значення, ECX = його довжина
+;      CF=1: такого заголовка немає
+;
+; Пошук без урахування регістру: у відповідях трапляється і
+; "Location", і "location", і навіть "LOCATION".
+; ----------------------------------------------------------
+HttpFindHeader:
+    push    rbx
+    push    rdx
+    push    rdi
+    push    r8
+    push    r9
+
+    mov     rbx, rsi
+    add     rbx, rcx                ; кінець відповіді
+    mov     r9, rdi                 ; шаблон
+
+.hfh_line:
+    cmp     rsi, rbx
+    jae     .hfh_no
+    ; порожній рядок - заголовки скінчились
+    cmp     byte [rsi], 13
+    je      .hfh_no
+
+    mov     rdi, r9
+    mov     r8, rsi                 ; початок цього рядка
+.hfh_cmp:
+    mov     dl, [rdi]
+    test    dl, dl
+    jz      .hfh_hit
+    cmp     r8, rbx
+    jae     .hfh_no
+    mov     al, [r8]
+    cmp     al, 65                  ; 'A'
+    jb      .hfh_nolow
+    cmp     al, 90                  ; 'Z'
+    ja      .hfh_nolow
+    add     al, 32
+.hfh_nolow:
+    cmp     al, dl
+    jne     .hfh_next
+    inc     rdi
+    inc     r8
+    jmp     .hfh_cmp
+
+.hfh_hit:
+    ; значення: пропускаємо пробіли після двокрапки
+.hfh_skipsp:
+    cmp     r8, rbx
+    jae     .hfh_no
+    cmp     byte [r8], 32
+    jne     .hfh_val
+    inc     r8
+    jmp     .hfh_skipsp
+.hfh_val:
+    mov     rsi, r8
+    xor     ecx, ecx
+.hfh_len:
+    cmp     r8, rbx
+    jae     .hfh_yes
+    mov     al, [r8]
+    cmp     al, 13
+    je      .hfh_yes
+    cmp     al, 10
+    je      .hfh_yes
+    inc     r8
+    inc     ecx
+    jmp     .hfh_len
+.hfh_yes:
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rdx
+    pop     rbx
+    clc
+    ret
+
+.hfh_next:
+    ; до кінця рядка і на наступний
+.hfh_eol:
+    cmp     rsi, rbx
+    jae     .hfh_no
+    mov     al, [rsi]
+    inc     rsi
+    cmp     al, 10
+    jne     .hfh_eol
+    jmp     .hfh_line
+
+.hfh_no:
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rdx
+    pop     rbx
+    stc
+    ret
+
+; ----------------------------------------------------------
+; WebParseLocation - розібрати значення Location у WebHost і HttpPath.
+;   RSI = значення, ECX = довжина
+;   -> EAX = 0 добре, 1 це https, 2 не розібрали
+;
+; Три випадки, які справді трапляються:
+;   http://хост/шлях   - міняємо і хост, і шлях
+;   /шлях              - той самий хост, інший шлях
+;   https://...        - здаємось чесно, а не мовчки
+; ----------------------------------------------------------
+WebParseLocation:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+
+    mov     rbx, rsi
+    add     rbx, rcx                ; кінець значення
+    test    ecx, ecx
+    jz      .wpl_bad
+
+    ; https:// ?
+    cmp     ecx, 8
+    jb      .wpl_chk_http
+    mov     rdi, rsi
+    lea     r8, [WebSchemeHttps]
+    call    WebPrefixEq
+    jc      .wpl_https
+
+.wpl_chk_http:
+    cmp     ecx, 7
+    jb      .wpl_chk_slash
+    mov     rdi, rsi
+    lea     r8, [WebSchemeHttp]
+    call    WebPrefixEq
+    jnc     .wpl_chk_slash
+
+    ; --- http://хост[/шлях] ---
+    add     rsi, 7
+    lea     rdi, [WebHost]
+    xor     edx, edx
+.wpl_host:
+    cmp     rsi, rbx
+    jae     .wpl_host_end
+    mov     al, [rsi]
+    cmp     al, 47                  ; '/'
+    je      .wpl_host_end
+    cmp     al, 58                  ; ':' - порт ігноруємо, у нас лише 80
+    je      .wpl_host_skipport
+    cmp     edx, 126
+    jae     .wpl_host_end
+    mov     [rdi], al
+    inc     rdi
+    inc     rsi
+    inc     edx
+    jmp     .wpl_host
+.wpl_host_skipport:
+    ; дочитуємо порт, але не запам'ятовуємо
+.wpl_port:
+    cmp     rsi, rbx
+    jae     .wpl_host_end
+    cmp     byte [rsi], 47
+    je      .wpl_host_end
+    inc     rsi
+    jmp     .wpl_port
+.wpl_host_end:
+    mov     byte [rdi], 0
+    test    edx, edx
+    jz      .wpl_bad                ; "http://" без хоста
+    jmp     .wpl_path
+
+.wpl_chk_slash:
+    cmp     byte [rsi], 47          ; '/'
+    jne     .wpl_bad                ; відносних шляхів не підтримуємо
+
+.wpl_path:
+    ; що лишилось - шлях; порожній означає корінь
+    lea     rdi, [HttpPath]
+    xor     edx, edx
+.wpl_pc:
+    cmp     rsi, rbx
+    jae     .wpl_path_end
+    cmp     edx, 126
+    jae     .wpl_path_end
+    mov     al, [rsi]
+    mov     [rdi], al
+    inc     rdi
+    inc     rsi
+    inc     edx
+    jmp     .wpl_pc
+.wpl_path_end:
+    test    edx, edx
+    jnz     .wpl_path_done
+    mov     byte [rdi], 47          ; '/'
+    inc     rdi
+.wpl_path_done:
+    mov     byte [rdi], 0
+    xor     eax, eax
+    jmp     .wpl_exit
+
+.wpl_https:
+    mov     eax, 1
+    jmp     .wpl_exit
+.wpl_bad:
+    mov     eax, 2
+.wpl_exit:
+    pop     r8
+    pop     rdi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rsi
+    ret
+
+; ----------------------------------------------------------
+; WebPrefixEq - чи починається RDI з рядка R8 (без урахування
+; регістру). RDI і R8 не псуємо.
+;   -> CF=1, якщо так
+; ----------------------------------------------------------
+WebPrefixEq:
+    push    rax
+    push    rdx
+    push    rdi
+    push    r8
+.wpe_loop:
+    mov     dl, [r8]
+    test    dl, dl
+    jz      .wpe_yes
+    mov     al, [rdi]
+    cmp     al, 65
+    jb      .wpe_nolow
+    cmp     al, 90
+    ja      .wpe_nolow
+    add     al, 32
+.wpe_nolow:
+    cmp     al, dl
+    jne     .wpe_no
+    inc     rdi
+    inc     r8
+    jmp     .wpe_loop
+.wpe_yes:
+    pop     r8
+    pop     rdi
+    pop     rdx
+    pop     rax
+    stc
+    ret
+.wpe_no:
+    pop     r8
+    pop     rdi
+    pop     rdx
+    pop     rax
+    clc
+    ret
+
+; ==========================================================
+; WEB <хост> [шлях] - показати сторінку текстом.
+;
+; Тягне те саме, що й GET, але замість друку в консоль перетворює
+; HTML на текст і віддає наявному переглядачу - тому самому, що
+; відкриває .TXT. Тому тут немає ні прокрутки, ні виходу по ESC:
+; усе це вже написано.
+;
+; Переглядач читає з VideoMemoryBase і бере довжину з LoadedFileSize,
+; тому наше завдання - покласти туди готовий текст.
+;
+; Перенаправлення проходимо самі, до п'яти разів. Без цього сайт, який
+; перекидає, показував би крихітну сторінку "Moved" - а виглядало б це
+; так, ніби зв'язок обірвався.
+;
+; -> CF=0, якщо є що показувати
+; ==========================================================
+WebCommand:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+    push    r9
+    push    r12
+    push    r13
+
+    cmp     byte [NetReady], 0
+    jne     .wb_card_ok
+    lea     r8, [MsgTcpNoCard]
+    jmp     .wb_say
+.wb_card_ok:
+
+    lea     rsi, [CmdBuffer + 4]    ; хвіст після 'WEB '
+    mov     r12, rsi
+
+    ; --- розрізаємо на хост і шлях ---
+.wb_tok:
+    mov     al, [rsi]
+    test    al, al
+    jz      .wb_nopath
+    cmp     al, 32
+    je      .wb_split
+    inc     rsi
+    jmp     .wb_tok
+.wb_split:
+    mov     byte [rsi], 0
+    inc     rsi
+.wb_sp:
+    cmp     byte [rsi], 32
+    jne     .wb_havepath
+    inc     rsi
+    jmp     .wb_sp
+.wb_havepath:
+    cmp     byte [rsi], 0
+    je      .wb_nopath
+    lea     rdi, [HttpPath]
+    call    StrAppendZ
+    mov     byte [rdi], 0
+    jmp     .wb_haveall
+.wb_nopath:
+    mov     byte [HttpPath], 47     ; '/'
+    mov     byte [HttpPath + 1], 0
+.wb_haveall:
+
+    cmp     byte [r12], 0
+    je      .wb_usage
+
+    ; Хост копіюємо у власний буфер: перенаправлення його змінює, а
+    ; писати в рядок команди для цього було б і тісно, і дивно.
+    mov     rsi, r12
+    lea     rdi, [WebHost]
+    call    StrAppendZ
+    mov     byte [rdi], 0
+
+    mov     byte [WebHops], 5
+
+; ---------- один похід по сторінку ----------
+.wb_fetch:
+    lea     rsi, [WebHost]
+    lea     rdi, [TcpCmdIp]
+    call    ParseIp
+    jnc     .wb_haveip
+
+    lea     rsi, [WebHost]
+    call    NetResolve
+    jc      .wb_dnsfail
+    lea     rsi, [NetTargetIp]
+    lea     rdi, [TcpCmdIp]
+    mov     rcx, 4
+    cld
+    rep     movsb
+.wb_haveip:
+
+    lea     rdi, [HttpReqBuf]
+    lea     rsi, [HttpTxtGet]
+    call    StrAppendZ
+    lea     rsi, [HttpPath]
+    call    StrAppendZ
+    lea     rsi, [HttpTxtVer]
+    call    StrAppendZ
+    lea     rsi, [WebHost]
+    call    StrAppendZ
+    lea     rsi, [HttpTxtTail]
+    call    StrAppendZ
+    lea     rax, [HttpReqBuf]
+    mov     r13, rdi
+    sub     r13, rax                ; довжина запиту
+
+    lea     rsi, [TcpCmdIp]
+    mov     cx, 80
+    call    TcpConnect
+    jc      .wb_noconn
+
+    lea     rsi, [HttpReqBuf]
+    mov     ecx, r13d
+    call    TcpSend
+    jc      .wb_nosend
+
+    call    TcpRecvWait
+    call    TcpCloseConn
+
+    cmp     dword [TcpRxLen], 0
+    je      .wb_empty
+
+; ---------- чи це перенаправлення ----------
+    mov     rsi, TcpRxBase
+    mov     ecx, [TcpRxLen]
+    call    HttpStatus
+    mov     r13d, eax               ; код відповіді
+
+    cmp     r13d, 301
+    je      .wb_redir
+    cmp     r13d, 302
+    je      .wb_redir
+    cmp     r13d, 303
+    je      .wb_redir
+    cmp     r13d, 307
+    je      .wb_redir
+    cmp     r13d, 308
+    jne     .wb_show
+
+.wb_redir:
+    dec     byte [WebHops]
+    jz      .wb_loops
+
+    mov     rsi, TcpRxBase
+    mov     ecx, [TcpRxLen]
+    lea     rdi, [HdrLocation]
+    call    HttpFindHeader
+    jc      .wb_show                ; перекидає, а куди - не каже
+
+    call    WebParseLocation
+    cmp     eax, 1
+    je      .wb_https
+    cmp     eax, 2
+    je      .wb_badloc
+
+    ; Куди пішли - показуємо: інакше незрозуміло, звідки взявся вміст.
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgWebRedir]
+    mov     r9d, COL_DIM
+    call    DrawString
+    mov     rcx, 130
+    mov     rdx, [CursorY]
+    lea     r8, [WebHost]
+    mov     r9d, COL_DIM
+    call    DrawString
+    call    NewLine
+    jmp     .wb_fetch
+
+; ---------- показ ----------
+.wb_show:
+    ; Тіло починається після порожнього рядка. Немає його - показуємо
+    ; усе як є: краще зайві заголовки, ніж порожній екран.
+    mov     rsi, TcpRxBase
+    mov     ecx, [TcpRxLen]
+    mov     rbx, rsi
+    add     rbx, rcx
+.wb_hdr:
+    mov     rdx, rsi
+    add     rdx, 4
+    cmp     rdx, rbx
+    jae     .wb_body_all
+    cmp     byte [rsi], 13
+    jne     .wb_hdr_next
+    cmp     byte [rsi + 1], 10
+    jne     .wb_hdr_next
+    cmp     byte [rsi + 2], 13
+    jne     .wb_hdr_next
+    cmp     byte [rsi + 3], 10
+    jne     .wb_hdr_next
+    add     rsi, 4
+    jmp     .wb_body
+.wb_hdr_next:
+    inc     rsi
+    jmp     .wb_hdr
+.wb_body_all:
+    mov     rsi, TcpRxBase
+.wb_body:
+    mov     rcx, rbx
+    sub     rcx, rsi
+
+    mov     rdi, VideoMemoryBase
+    call    HtmlToText
+    mov     [LoadedFileSize], ecx
+
+    ; Переглядач показує ім'я з ParsedFileName - хай там буде щось
+    ; осмислене, а не залишок від попередньої команди.
+    lea     rdi, [ParsedFileName]
+    lea     rsi, [MsgWebName]
+    mov     rcx, 11
+    cld
+    rep     movsb
+
+    clc
+    jmp     .wb_exit
+
+; ---------- невдачі ----------
+.wb_usage:
+    lea     r8, [MsgWebUsage]
+    jmp     .wb_say
+.wb_dnsfail:
+    lea     r8, [MsgHttpDnsFail]
+    jmp     .wb_say
+.wb_noconn:
+    lea     r8, [MsgTcpTimeout]
+    jmp     .wb_say
+.wb_nosend:
+    call    TcpCloseConn
+    lea     r8, [MsgHttpNoSend]
+    jmp     .wb_say
+.wb_empty:
+    lea     r8, [MsgWebEmpty]
+    jmp     .wb_say
+.wb_https:
+    lea     r8, [MsgWebHttps]
+    jmp     .wb_say
+.wb_loops:
+    lea     r8, [MsgWebLoops]
+    jmp     .wb_say
+.wb_badloc:
+    lea     r8, [MsgWebBadLoc]
+.wb_say:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+    stc
+.wb_exit:
     pop     r13
     pop     r12
     pop     r9
@@ -12876,6 +13944,10 @@ SyscallHandler:
     je      .sys_yield
     cmp     rax, 46                 ; де лежить текст задачі у вікні
     je      .sys_app_text
+    cmp     rax, 47                 ; виконати команду ядра, вивід у буфер
+    je      .sys_kernel_cmd
+    cmp     rax, 48                 ; дістати сторінку текстом
+    je      .sys_web_fetch
 
     jmp     .syscall_end        
 
@@ -13094,6 +14166,186 @@ SyscallHandler:
 ; ------------------------------------------------------------
 .sys_app_text:
     mov     rax, AppTextHdr
+    jmp     .syscall_end
+
+; ------------------------------------------------------------
+; syscall 48 - дістати сторінку й лишити її текстом у буфері.
+;
+;   RSI = "хост [шлях]"
+;   RAX = довжина сторінки, або 0 якщо не вийшло
+;
+; Робить те саме, що команда WEB, але замість повноекранного
+; переглядача лишає готовий текст там, звідки його бере syscall 46:
+; показувати буде оболонка, у своєму вікні.
+;
+; Коли не вийшло, у буфері лишається причина - те саме повідомлення,
+; яке WebCommand надрукувала б у консоль. Тому нуль тут не означає
+; "нічого сказати": оболонці є що показати й у цьому разі.
+; ------------------------------------------------------------
+.sys_web_fetch:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+
+    call    AppTextReset
+
+    ; WebCommand читає аргументи з CmdBuffer після 'WEB ' - складаємо
+    ; рядок саме в такому вигляді, щоб не дублювати її розбір.
+    lea     rdi, [CmdBuffer]
+    mov     byte [rdi + 0], 87      ; 'W'
+    mov     byte [rdi + 1], 69      ; 'E'
+    mov     byte [rdi + 2], 66      ; 'B'
+    mov     byte [rdi + 3], 32      ; ' '
+    add     rdi, 4
+    xor     rcx, rcx
+.swf_copy:
+    cmp     rcx, 58
+    jae     .swf_copied
+    mov     al, [rsi]
+    test    al, al
+    jz      .swf_copied
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    inc     rcx
+    jmp     .swf_copy
+.swf_copied:
+    mov     byte [rdi], 0
+
+    ; Переривання вмикаємо з тієї ж причини, що й у syscall 47: без
+    ; них таймер стоїть, а мережа чекає саме по ньому.
+    mov     byte [ConsoleToBuf], 1
+    sti
+    call    WebCommand
+    cli
+    mov     byte [ConsoleToBuf], 0
+    jc      .swf_fail
+
+    ; Вийшло. У буфері зараз можуть лежати рядки про перенаправлення -
+    ; сторінка потрібніша, тому починаємо його заново.
+    call    AppTextReset
+    mov     rsi, VideoMemoryBase
+    mov     ecx, [LoadedFileSize]
+    cmp     ecx, APPTEXT_MAX - 1
+    jbe     .swf_len_ok
+    mov     ecx, APPTEXT_MAX - 1
+.swf_len_ok:
+    test    ecx, ecx
+    jz      .swf_ret
+.swf_put:
+    mov     al, [rsi]
+    inc     rsi
+    call    AppTextPutChar
+    dec     ecx
+    jnz     .swf_put
+
+.swf_ret:
+    mov     eax, [AppTextHdr + 8]
+    jmp     .swf_exit
+.swf_fail:
+    xor     eax, eax                ; причина лишилась у буфері
+.swf_exit:
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    jmp     .syscall_end
+
+
+; ------------------------------------------------------------
+; syscall 47 - виконати команду ядра й віддати її вивід текстом.
+;
+;   RSI = рядок команди
+;   RAX = скільки байтів виводу (текст там, куди вказує syscall 46)
+;
+; Працює це так: ConsoleToBuf перемикає DrawString і NewLine з
+; малювання на дописування в буфер, після чого викликається той
+; самий ExecuteCommand, що й у консолі ядра. Жодну з тридцяти
+; восьми команд переписувати не довелося - у них спільна точка
+; друку, і перехоплення стоїть саме в ній.
+;
+; Не всі команди сюди годяться. RUN запускає програму, OPEN, EDIT і
+; WEB забирають екран під власний цикл клавіш - виклик такого з
+; вікна оболонки означав би два господарі екрана одночасно. Тому
+; перелік заборонених, і він тут навмисно один: розкидати перевірки
+; по командах означало б рано чи пізно одну пропустити.
+; ------------------------------------------------------------
+.sys_kernel_cmd:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+
+    call    AppTextReset
+
+    ; --- заборонені ---
+    lea     rbx, [KCmdDenied]
+.kc_deny:
+    cmp     byte [rbx], 0
+    je      .kc_allowed
+    mov     rdi, rsi                ; що перевіряємо
+    mov     r8, rbx                 ; із чим
+    call    WebPrefixEq
+    jc      .kc_refuse
+.kc_deny_skip:
+    cmp     byte [rbx], 0
+    je      .kc_deny_step
+    inc     rbx
+    jmp     .kc_deny_skip
+.kc_deny_step:
+    inc     rbx
+    jmp     .kc_deny
+
+.kc_allowed:
+    ; --- копіюємо рядок у той самий буфер, який читає ExecuteCommand ---
+    lea     rdi, [CmdBuffer]
+    xor     rcx, rcx
+.kc_copy:
+    cmp     rcx, 62
+    jae     .kc_copied
+    mov     al, [rsi]
+    test    al, al
+    jz      .kc_copied
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    inc     rcx
+    jmp     .kc_copy
+.kc_copied:
+    mov     byte [rdi], 0
+    mov     [BufferLen], rcx
+
+    mov     byte [ConsoleToBuf], 1
+
+    ; Переривання на час команди ОБОВ'ЯЗКОВО вмикаємо. Виклики йдуть
+    ; через шлюз переривання, тобто з IF=0, а мережеві команди тепер
+    ; чекають по SystemTicks, який рухає таймер. Без переривань
+    ; лічильник стоїть, і TCP чекав би відповіді вічно.
+    sti
+    call    ExecuteCommand
+    cli
+
+    mov     byte [ConsoleToBuf], 0
+    jmp     .kc_done
+
+.kc_refuse:
+    mov     byte [ConsoleToBuf], 1
+    lea     r8, [MsgKCmdDenied]
+    call    DrawString
+    call    NewLine
+    mov     byte [ConsoleToBuf], 0
+
+.kc_done:
+    mov     eax, [AppTextHdr + 8]
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
     jmp     .syscall_end
 
 ; ------------------------------------------------------------
