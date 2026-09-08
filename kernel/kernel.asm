@@ -40,6 +40,44 @@ CanvasBase      equ 0x7500000  ; 117 МБ
 ; 5 МБ, тож із запасом. Вище - буфери дескрипторів на 0x8000000.
 CANVAS_MAX      equ 0x800000
 
+; Текст, надрукований задачею у вікні. Лежить поруч із полотном і з
+; тієї ж причини: у спільній частині простору, бо пише його дитина,
+; а показує батько. Досі такий текст просто зникав - малювати його
+; на екран означало б лягти поверх усієї оболонки.
+AppTextBase     equ 0x7D00000  ; 125 МБ
+APPTEXT_MAX     equ 0x8000     ; 32 КБ
+
+; Буфер прийому TCP. Тримати його всередині образу ядра як rb не
+; можна: fasm заповнив би ті чверть мегабайта нулями просто у файлі.
+; Тому окрема ділянка - між текстом задачі та буферами дескрипторів.
+TcpRxBase       equ 0x7D10000  ; 125 МБ + 64 КБ
+TCP_RXCAP       equ 0x40000    ; 256 КБ
+
+; Поле вікна в TCP шістнадцятибітне, тому оголосити більше за це не
+; можна, хоч би скільки ми вміщали. Буфер більший саме тому: вікно
+; закривається не тоді, коли буфер повний, а коли повний на 64 КБ.
+TCP_WINMAX      equ 65535
+
+; Скільки чекати підтвердження і скільки разів перепитувати.
+; Час, а не оберти циклу: скільки обертів устигне зробити
+; NetPollBackground, залежить від того, чим зайнята машина, а
+; півсекунди лишаються півсекундою.
+TCP_RTO         equ 500        ; мілісекунд; таймер у нас на 1000 Гц
+TCP_RETRIES     equ 5
+
+; --- TCP ---
+TCP_FIN         equ 0x01
+TCP_SYN         equ 0x02
+TCP_RST         equ 0x04
+TCP_PSH         equ 0x08
+TCP_ACK         equ 0x10
+
+TCPS_CLOSED     equ 0
+TCPS_SYNSENT    equ 1
+TCPS_ESTAB      equ 2
+TCPS_DONE       equ 3
+
+
 ; --- РЕДАКТОР ---
 ; Буфер більше не статичний масив у тілі ядра, а окрема ділянка
 ; пам'яті: 32 КБ не вміщали навіть kernel.asm (285 КБ), і файл
@@ -459,6 +497,18 @@ ExecuteCommand:
     call    StrPrefix
     test    rax, rax
     jz      .run_nslookup
+
+    lea     rsi, [CmdBuffer]
+    lea     rdi, [CmdHttpGet]
+    call    StrPrefix
+    test    rax, rax
+    jz      .run_httpget
+
+    lea     rsi, [CmdBuffer]
+    lea     rdi, [CmdTcp]
+    call    StrPrefix
+    test    rax, rax
+    jz      .run_tcp
 
     lea     rsi, [CmdBuffer]
     lea     rdi, [CmdSetDns]
@@ -2446,6 +2496,14 @@ ExecuteCommand:
 
 .run_nslookup:
     call    NsLookupCommand
+    jmp     .finish
+
+.run_httpget:
+    call    HttpGetCommand
+    jmp     .finish
+
+.run_tcp:
+    call    TcpCommand
     jmp     .finish
 
 .run_setdns:
@@ -5986,6 +6044,8 @@ CmdPing         db 'PING', 0
 CmdPingArg      db 'PING ', 0
 CmdNsLookup     db 'NSLOOKUP ', 0
 CmdSetDns       db 'SETDNS ', 0
+CmdTcp          db 'TCP ', 0
+CmdHttpGet      db 'GET ', 0
 CmdCopy         db 'COPY ', 0
 CmdInstall      db 'INSTALL ', 0
 CmdDhcp         db 'DHCP', 0
@@ -6260,6 +6320,7 @@ DnsStage        dd 0            ; як далеко дійшов NetResolve
 DnsSentLen      dd 0            ; довжина, передана у NetSendUdp
 DnsFrameLen     dd 0            ; підсумкова довжина кадру
 DnsTxOk         db 0            ; 1 = NetSend повернув успіх
+DnsFellBack     db 0            ; уже пробували запасний сервер імен
 align 4
 DnsDbgCalls     dd 0            ; скільки разів викликано NetHandleDns
 DnsDbgStage     dd 0            ; як далеко пройшов розбір
@@ -6319,6 +6380,59 @@ NetIpId         dw 0            ; лічильник ідентифікатор�
 align 4
 NetArpReplies   dd 0            ; скільки разів ми відповіли на ARP
 NetPingsAnswered dd 0           ; скільки чужих пінгів ми обслужили
+
+; --- TCP ---
+;
+; Клієнтський і на одне з'єднання за раз - як і решта підсистем тут:
+; стан декодера відео теж один. Цього досить, щоб зробити запит і
+; прочитати відповідь.
+;
+; Чого свідомо немає: переупорядкування (сегмент не за номером просто
+; відкидаємо, і відправник надішле його ще раз - повільно, зате
+; правильно), вікна більшого за буфер, і будь-яких опцій.
+align 8
+TcpState        db 0            ; TCPS_*
+TcpFinSeen      db 0            ; співрозмовник закрив свій бік
+TcpRstSeen      db 0            ; з'єднання збили
+TcpGotAck       db 0            ; прийшов ACK на послане нами
+align 2
+TcpLocalPort    dw 0            ; порти зберігаємо в МЕРЕЖЕВОМУ порядку
+TcpRemotePort   dw 0
+TcpPortSeed     dw 0            ; щоб два з'єднання поспіль не збіглись
+TcpRemoteIp     db 0, 0, 0, 0
+align 4
+TcpSndNxt       dd 0            ; наступний номер, який ми пошлемо
+TcpSndUna       dd 0            ; найстаріше, ще не підтверджене ними
+TcpRcvNxt       dd 0            ; номер, якого ми чекаємо від них
+TcpRxLen        dd 0            ; скільки байтів уже прийнято
+align 4
+TcpCmdIp        db 0, 0, 0, 0   ; аргументи команди TCP
+TcpCmdPort      dw 0
+MsgTcpTrying    db 'CONNECTING TO', 0
+MsgTcpOk        db 'CONNECTED - HANDSHAKE COMPLETE', 0
+align 4
+TcpRxSegs       dd 0            ; скільки TCP-сегментів прийшло взагалі
+TcpFailWhy      db 0            ; чому не вийшло; див. TcpCommand
+MsgTcpNoCard    db 'NETWORK CARD IS NOT UP - RUN NETINIT FIRST', 0
+MsgTcpNoArp     db 'NO ARP REPLY FROM GATEWAY - IS THE NETWORK UP', 0
+MsgTcpNoSend    db 'COULD NOT SEND THE PACKET', 0
+MsgTcpRst       db 'REFUSED - RST RECEIVED, SO THE PACKET DID ARRIVE', 0
+MsgTcpTimeout   db 'NO REPLY - TIMED OUT', 0
+MsgTcpSeen      db 'TCP SEGMENTS RECEIVED:', 0
+HttpTxtGet      db 'GET ', 0
+HttpTxtVer      db ' HTTP/1.0', 13, 10, 'Host: ', 0
+HttpTxtTail     db 13, 10, 'Connection: close', 13, 10, 13, 10, 0
+MsgHttpResolved db 'RESOLVED TO:', 0
+MsgHttpDnsFail  db 'COULD NOT RESOLVE THAT NAME', 0
+MsgDnsStage     db 'DNS STOPPED AT STAGE:', 0
+MsgDnsTx        db 'FRAME SENT:', 0
+align 8
+HttpPath        rb 128
+HttpReqBuf      rb 512
+MsgHttpBytes    db 'BYTES RECEIVED:', 0
+MsgHttpNoSend   db 'REQUEST WAS NOT ACKNOWLEDGED', 0
+MsgHttpUsage    db 'USAGE: GET <HOST OR IP> [PATH]', 0
+MsgTcpUsage     db 'USAGE: TCP <IP> <PORT>', 0
 
 MsgPingTo       db 'PINGING 10.0.2.2 WITH 32 BYTES OF DATA:', 0
 MsgPingOk       db 'REPLY FROM 10.0.2.2   SEQ=', 0
@@ -6448,6 +6562,14 @@ align 8
 KeysOwner       dq 0            ; хто віддав чергу своїй дитині
 align 8
 FsBusy          db 0            ; ядро зараз працює з диском
+align 8
+; Заголовок буфера тексту. Оболонка бере його адресу один раз
+; (syscall 46) і далі читає поля прямо з пам'яті: вона спільна, тож
+; питати ядро на кожному кадрі немає потреби.
+AppTextHdr:
+    dq  AppTextBase             ; +0  де лежить текст
+    dd  0                       ; +8  скільки байтів
+    dd  0                       ; +12 лічильник змін
 align 8
 
 ; --- СТЕК ІСТОРІЇ ПАПОК ---
@@ -8004,6 +8126,8 @@ NetHandleFrame:
     ; Протокол лежить у байті 9 заголовка IP (тобто 14+9 = 23)
     cmp     byte [NetRxFrame + 23], 17  ; 17 = UDP
     je      .hf_udp
+    cmp     byte [NetRxFrame + 23], 6   ; 6 = TCP
+    je      .hf_tcp
     cmp     byte [NetRxFrame + 23], 1   ; 1 = ICMP
     jne     .hf_done
 
@@ -8025,6 +8149,11 @@ NetHandleFrame:
 
 .hf_echo_rep:
     mov     byte [NetPingGot], 1
+    jmp     .hf_done
+
+; ---------- TCP ----------
+.hf_tcp:
+    call    NetHandleTcp
     jmp     .hf_done
 
 ; ---------- UDP ----------
@@ -9137,6 +9266,8 @@ NetResolve:
 .nr_have_mac:
     mov     dword [DnsStage], 2     ; MAC шлюзу відома
 
+    mov     byte [DnsFellBack], 0
+.nr_send:
     ; і лише тепер, коли ніхто більше не викликається, готуємо аргументи
     mov     r11d, [DnsLen]
     lea     r10, [DnsBuf]
@@ -9152,14 +9283,29 @@ NetResolve:
     mov     dword [DnsStage], 4     ; повернулись із відправки
 
     ; --- Чекаємо відповідь ---
-    mov     r12d, 4000000
+    ;
+    ; По часу, а не по обертах циклу: скільки обертів устигне зробити
+    ; NetPollBackground, залежить від того, чим зайнята машина.
+    mov     rbx, [SystemTicks]
+    add     rbx, 2000               ; дві секунди на відповідь
 .nr_wait:
     call    NetPollBackground
     cmp     byte [DnsGot], 0
     jne     .nr_ok
-    dec     r12d
-    jnz     .nr_wait
-    jmp     .nr_fail
+    mov     rax, [SystemTicks]
+    cmp     rax, rbx
+    jb      .nr_wait
+
+    ; Тиша. Вбудований резолвер slirp за 10.0.2.3 відповідає не в
+    ; кожній збірці QEMU, і мовчазна відмова тут коштувала б ручного
+    ; SETDNS на кожному запуску. Тому один раз пробуємо публічний
+    ; сервер: NAT до нього однаково працює, раз працює TCP назовні.
+    cmp     byte [DnsFellBack], 0
+    jne     .nr_fail
+    mov     byte [DnsFellBack], 1
+    mov     dword [NetDnsIp], 0x08080808    ; 8.8.8.8
+    mov     byte [DnsGot], 0
+    jmp     .nr_send
 
 .nr_ok:
     clc
@@ -9261,6 +9407,700 @@ NetHandleDns:
 ; ==========================================================
 ; NsLookupCommand - команда NSLOOKUP <ім'я>
 ; ==========================================================
+; ==========================================================
+; TCP
+; ==========================================================
+
+; ----------------------------------------------------------
+; NetTcpChecksum - сума сегмента разом із псевдозаголовком.
+;   RDI = початок сегмента, ECX = його довжина
+;   -> AX = готове значення, кладеться в поле як є
+;
+; Псевдозаголовка в пам'яті не існує - його поля просто додаються
+; до суми. У UDP суму дозволено не рахувати взагалі, у TCP - ні,
+; тому обійтись як там не вийде.
+;
+; Байти беремо так, як вони лягли б у мережу: сума байт-орієнтована,
+; а не числова, тому довжину переставляємо вручну.
+; ----------------------------------------------------------
+NetTcpChecksum:
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+
+    xor     eax, eax
+    movzx   ebx, word [NetMyIp]
+    add     eax, ebx
+    movzx   ebx, word [NetMyIp + 2]
+    add     eax, ebx
+    movzx   ebx, word [TcpRemoteIp]
+    add     eax, ebx
+    movzx   ebx, word [TcpRemoteIp + 2]
+    add     eax, ebx
+    add     eax, 0x0600             ; байти 00 06: нуль і номер протоколу
+    mov     bx, cx
+    xchg    bl, bh                  ; довжина старшим байтом уперед
+    movzx   ebx, bx
+    add     eax, ebx
+
+    mov     rsi, rdi
+    mov     edx, ecx
+.tcs_loop:
+    cmp     edx, 2
+    jb      .tcs_tail
+    movzx   ebx, word [rsi]
+    add     eax, ebx
+    add     rsi, 2
+    sub     edx, 2
+    jmp     .tcs_loop
+.tcs_tail:
+    test    edx, edx
+    jz      .tcs_fold
+    movzx   ebx, byte [rsi]
+    add     eax, ebx
+.tcs_fold:
+    mov     ebx, eax
+    shr     ebx, 16
+    and     eax, 0xFFFF
+    add     eax, ebx
+    mov     ebx, eax
+    shr     ebx, 16
+    add     eax, ebx
+    not     eax
+    and     eax, 0xFFFF
+
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    ret
+
+; ----------------------------------------------------------
+; NetSendTcp - зібрати й відправити один сегмент.
+;   DL   = прапорці (TCP_SYN, TCP_ACK, ...)
+;   R10  = дані, R11D = скільки їх (0, якщо самі прапорці)
+;   Решту бере зі стану з'єднання.
+;   -> CF=1, якщо відправити не вдалося
+; ----------------------------------------------------------
+NetSendTcp:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r10
+    push    r11
+    push    r12
+    push    r14
+
+    movzx   r12d, dl                ; прапорці переживуть виклики нижче
+
+    cmp     byte [NetGwKnown], 0
+    jne     .st_have_mac
+    call    NetDoArp
+    cmp     byte [NetGwKnown], 0
+    je      .st_fail
+.st_have_mac:
+
+    lea     rsi, [NetGwMac]
+    mov     bx, 0x0008              ; 0x0800 у порядку пам'яті
+    call    NetBuildEth
+
+    ; --- IPv4 ---
+    lea     rdi, [NetFrame + 14]
+    mov     byte [rdi + 0], 0x45
+    mov     byte [rdi + 1], 0x00
+    mov     eax, r11d
+    add     eax, 40                 ; 20 IP + 20 TCP
+    mov     r14d, eax
+    mov     [rdi + 2], ah
+    mov     [rdi + 3], al
+    mov     ax, [NetIpId]
+    mov     [rdi + 4], ax
+    inc     word [NetIpId]
+    mov     word [rdi + 6], 0
+    mov     byte [rdi + 8], 64      ; TTL
+    mov     byte [rdi + 9], 6       ; протокол 6 = TCP
+    mov     word [rdi + 10], 0
+    push    rdi
+    lea     rsi, [NetMyIp]
+    add     rdi, 12
+    mov     rcx, 4
+    cld
+    rep     movsb
+    lea     rsi, [TcpRemoteIp]
+    mov     rcx, 4
+    rep     movsb
+    pop     rdi
+
+    mov     rsi, rdi
+    mov     ecx, 20
+    call    NetChecksum
+    mov     [rdi + 10], ax
+
+    ; --- TCP ---
+    lea     rdi, [NetFrame + 34]
+    mov     ax, [TcpLocalPort]
+    mov     [rdi + 0], ax
+    mov     ax, [TcpRemotePort]
+    mov     [rdi + 2], ax
+    mov     eax, [TcpSndNxt]
+    bswap   eax
+    mov     [rdi + 4], eax
+    mov     eax, [TcpRcvNxt]
+    bswap   eax
+    mov     [rdi + 8], eax
+    mov     byte [rdi + 12], 0x50   ; заголовок 5 слів, опцій немає
+    mov     [rdi + 13], r12b
+
+    ; Вікном оголошуємо те, що ще вміщаємо, але не більше за стелю
+    ; самого поля: воно шістнадцятибітне. Збрехати більше означало б
+    ; попросити даних, які нікуди подіти.
+    mov     eax, TCP_RXCAP
+    sub     eax, [TcpRxLen]
+    jns     .st_win_pos
+    xor     eax, eax
+.st_win_pos:
+    cmp     eax, TCP_WINMAX
+    jbe     .st_win_ok
+    mov     eax, TCP_WINMAX
+.st_win_ok:
+    mov     [rdi + 14], ah
+    mov     [rdi + 15], al
+    mov     word [rdi + 16], 0      ; сума - нижче, поки нуль
+    mov     word [rdi + 18], 0      ; вказівник термінових даних
+
+    test    r11d, r11d
+    jz      .st_no_data
+    push    rdi
+    lea     rdi, [NetFrame + 54]
+    mov     rsi, r10
+    mov     ecx, r11d
+    cld
+    rep     movsb
+    pop     rdi
+.st_no_data:
+
+    mov     ecx, r11d
+    add     ecx, 20
+    call    NetTcpChecksum
+    mov     [rdi + 16], ax
+
+    lea     rsi, [NetFrame]
+    mov     ecx, r14d
+    add     ecx, 14
+    call    NetSend
+    jc      .st_fail
+    clc
+    jmp     .st_exit
+.st_fail:
+    stc
+.st_exit:
+    pop     r14
+    pop     r12
+    pop     r11
+    pop     r10
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; ----------------------------------------------------------
+; NetHandleTcp - розібрати прийнятий сегмент.
+; Кадр лежить у NetRxFrame. Кличеться з NetHandleFrame.
+;
+; Приймаємо лише те, що точно за порядком: сегмент із чужим номером
+; просто відкидаємо, і відправник надішле його ще раз. Черга з дірок
+; коштувала б окремої структури, а виграшу на наших швидкостях не
+; дала б жодного.
+; ----------------------------------------------------------
+NetHandleTcp:
+    ; Лічимо ВСІ TCP-сегменти, ще до перевірки портів і стану. Нуль
+    ; тут означає, що назад не прийшло нічого - тобто справа в тому,
+    ; що ми відправляємо, а не в тому, як розбираємо.
+    inc     dword [TcpRxSegs]
+
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+
+    cmp     byte [TcpState], TCPS_CLOSED
+    je      .ht_done                ; нічого не відкрито - нема чого слухати
+
+    movzx   r8d, byte [NetRxFrame + 14]
+    and     r8d, 0x0F
+    shl     r8d, 2                  ; довжина заголовка IP
+    lea     rsi, [NetRxFrame + 14]
+    add     rsi, r8                 ; RSI -> початок TCP
+
+    ; Чужі розмови нас не стосуються
+    mov     ax, [rsi + 2]
+    cmp     ax, [TcpLocalPort]
+    jne     .ht_done
+    mov     ax, [rsi + 0]
+    cmp     ax, [TcpRemotePort]
+    jne     .ht_done
+
+    mov     dl, [rsi + 13]          ; прапорці
+
+    test    dl, TCP_RST
+    jz      .ht_no_rst
+    mov     byte [TcpRstSeen], 1
+    mov     byte [TcpState], TCPS_DONE
+    jmp     .ht_done
+.ht_no_rst:
+
+    ; --- скільки корисних даних ---
+    movzx   eax, byte [NetRxFrame + 16]
+    shl     eax, 8
+    movzx   ecx, byte [NetRxFrame + 17]
+    or      eax, ecx                ; загальна довжина IP-пакета
+    sub     eax, r8d                ; мінус заголовок IP
+    movzx   ecx, byte [rsi + 12]
+    shr     ecx, 4
+    shl     ecx, 2                  ; довжина заголовка TCP
+    mov     r10d, ecx               ; знадобиться як зсув до даних
+    sub     eax, ecx
+    js      .ht_done                ; зіпсована довжина
+    mov     r9d, eax                ; R9D = байтів даних
+
+    ; --- SYN_SENT: чекаємо SYN+ACK ---
+    cmp     byte [TcpState], TCPS_SYNSENT
+    jne     .ht_established
+    mov     al, dl
+    and     al, TCP_SYN or TCP_ACK
+    cmp     al, TCP_SYN or TCP_ACK
+    jne     .ht_done
+
+    mov     eax, [rsi + 4]
+    bswap   eax
+    inc     eax                     ; SYN займає один номер
+    mov     [TcpRcvNxt], eax
+    mov     eax, [rsi + 8]
+    bswap   eax
+    mov     [TcpSndUna], eax
+    mov     [TcpSndNxt], eax
+    mov     byte [TcpState], TCPS_ESTAB
+
+    mov     dl, TCP_ACK
+    xor     r10, r10
+    xor     r11d, r11d
+    call    NetSendTcp
+    jmp     .ht_done
+
+.ht_established:
+    ; --- ACK: посуваємо межу підтвердженого ---
+    test    dl, TCP_ACK
+    jz      .ht_no_ack
+    mov     eax, [rsi + 8]
+    bswap   eax
+    mov     [TcpSndUna], eax
+    mov     byte [TcpGotAck], 1
+.ht_no_ack:
+
+    ; --- Дані ---
+    test    r9d, r9d
+    jz      .ht_check_fin
+    mov     eax, [rsi + 4]
+    bswap   eax
+    cmp     eax, [TcpRcvNxt]
+    jne     .ht_dup_ack             ; не наш шматок - просимо повторити
+
+    mov     eax, TCP_RXCAP
+    sub     eax, [TcpRxLen]
+    jle     .ht_no_room
+    cmp     r9d, eax
+    jle     .ht_fits
+    mov     r9d, eax                ; більше не вміщаємо
+.ht_fits:
+    push    rsi
+    push    rdi
+    mov     rdi, TcpRxBase
+    mov     eax, [TcpRxLen]
+    add     rdi, rax
+    add     rsi, r10                ; пропускаємо заголовок TCP
+    mov     ecx, r9d
+    cld
+    rep     movsb
+    pop     rdi
+    pop     rsi
+
+    mov     eax, [TcpRcvNxt]
+    add     eax, r9d
+    mov     [TcpRcvNxt], eax
+    mov     eax, [TcpRxLen]
+    add     eax, r9d
+    mov     [TcpRxLen], eax
+.ht_no_room:
+
+.ht_check_fin:
+    test    dl, TCP_FIN
+    jz      .ht_ack_if_needed
+    inc     dword [TcpRcvNxt]       ; FIN теж займає номер
+    mov     byte [TcpFinSeen], 1
+    mov     byte [TcpState], TCPS_DONE
+    mov     dl, TCP_ACK
+    xor     r10, r10
+    xor     r11d, r11d
+    call    NetSendTcp
+    jmp     .ht_done
+
+.ht_ack_if_needed:
+    test    r9d, r9d
+    jz      .ht_done                ; нічого не прийняли - нічого й підтверджувати
+.ht_dup_ack:
+    mov     dl, TCP_ACK
+    xor     r10, r10
+    xor     r11d, r11d
+    call    NetSendTcp
+
+.ht_done:
+    pop     r11
+    pop     r10
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; ----------------------------------------------------------
+; TcpParsePort - розібрати десяткове число з рядка RSI.
+;   -> AX = число, RSI показує за ним; CF=1, якщо цифр не було
+; ----------------------------------------------------------
+TcpParsePort:
+    push    rbx
+    push    rcx
+    xor     eax, eax
+    xor     ecx, ecx                ; скільки цифр узяли
+.tpp_loop:
+    movzx   ebx, byte [rsi]
+    cmp     bl, '0'
+    jb      .tpp_end
+    cmp     bl, '9'
+    ja      .tpp_end
+    sub     bl, '0'
+    imul    eax, eax, 10
+    add     eax, ebx
+    inc     rsi
+    inc     ecx
+    cmp     eax, 65535
+    ja      .tpp_fail               ; у порт таке не влізе
+    jmp     .tpp_loop
+.tpp_end:
+    test    ecx, ecx
+    jz      .tpp_fail
+    clc
+    jmp     .tpp_exit
+.tpp_fail:
+    stc
+.tpp_exit:
+    pop     rcx
+    pop     rbx
+    ret
+
+; ----------------------------------------------------------
+; TcpConnect - відкрити з'єднання й дочекатися підтвердження.
+;   RSI = адреса отримувача (4 байти), CX = порт у звичайному вигляді
+;   -> CF=0 встановлено, CF=1 ні
+;
+; Чекаємо так само, як чекає DNS: крутимо NetPollBackground і
+; дивимось на стан. Свого потоку в мережевого стека немає, тож
+; приймати кадри більше нема кому.
+; ----------------------------------------------------------
+TcpConnect:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r10
+    push    r11
+    push    r13
+
+    ; Причини невдачі розділяємо. Спершу тут було одне повідомлення
+    ; на всі випадки - і воно однаково казало "немає відповіді" й
+    ; тоді, коли пакет навіть не пішов. Шукати з таким підказником
+    ; можна довго.
+    mov     byte [TcpFailWhy], 0
+    mov     dword [TcpRxSegs], 0
+
+    cmp     byte [NetReady], 0
+    jne     .tc_card_ok
+    mov     byte [TcpFailWhy], 1        ; карту не піднято
+    jmp     .tc_fail
+.tc_card_ok:
+
+    mov     byte [TcpState], TCPS_CLOSED
+    mov     byte [TcpFinSeen], 0
+    mov     byte [TcpRstSeen], 0
+    mov     byte [TcpGotAck], 0
+    mov     dword [TcpRxLen], 0
+    mov     dword [TcpRcvNxt], 0
+
+    lea     rdi, [TcpRemoteIp]
+    push    rcx
+    mov     rcx, 4
+    cld
+    rep     movsb
+    pop     rcx
+
+    xchg    cl, ch                  ; порт у мережевий порядок
+    mov     [TcpRemotePort], cx
+
+    ; MAC шлюзу питаємо ДО відправки, щоб відрізнити "мережі немає"
+    ; від "порт мовчить".
+    cmp     byte [NetGwKnown], 0
+    jne     .tc_arp_ok
+    call    NetDoArp
+    cmp     byte [NetGwKnown], 0
+    jne     .tc_arp_ok
+    mov     byte [TcpFailWhy], 2        ; шлюз не відповів на ARP
+    jmp     .tc_fail
+.tc_arp_ok:
+
+    ; Локальний порт із динамічного діапазону. Лічильник потрібен,
+    ; щоб два з'єднання поспіль не взяли той самий номер: відповіді
+    ; на попереднє інакше зарахувалися б новому.
+    mov     ax, [TcpPortSeed]
+    inc     word [TcpPortSeed]
+    and     ax, 0x0FFF
+    or      ax, 0xC000              ; 49152..53247
+    xchg    al, ah
+    mov     [TcpLocalPort], ax
+
+    ; Початковий номер беремо від таймера з тієї ж причини.
+    mov     rax, [SystemTicks]      ; лічильник 64-бітний, беремо молодшу частину
+    shl     eax, 8
+    mov     [TcpSndNxt], eax
+    mov     [TcpSndUna], eax
+
+    mov     byte [TcpState], TCPS_SYNSENT
+
+    ; TcpSndNxt тут НЕ рушимо. SYN займає один номер, але додати його
+    ; зараз означало б, що повторний SYN піде вже з наступним - для
+    ; того боку це був би інший сегмент. Правильне значення прийде
+    ; разом із SYN+ACK: обробник візьме його з їхнього поля ACK.
+    mov     r13d, TCP_RETRIES
+.tc_try:
+    mov     dl, TCP_SYN
+    xor     r10, r10
+    xor     r11d, r11d
+    call    NetSendTcp
+    jnc     .tc_sent
+    mov     byte [TcpFailWhy], 3        ; кадр не пішов у дріт
+    jmp     .tc_fail
+.tc_sent:
+    mov     rbx, [SystemTicks]
+    add     rbx, TCP_RTO                ; коли перепитувати
+.tc_wait:
+    call    NetPollBackground
+    cmp     byte [TcpState], TCPS_ESTAB
+    je      .tc_ok
+    cmp     byte [TcpRstSeen], 0
+    je      .tc_tick
+    mov     byte [TcpFailWhy], 4        ; RST - пакет ДІЙШОВ, порт закритий
+    jmp     .tc_fail
+.tc_tick:
+    mov     rax, [SystemTicks]
+    cmp     rax, rbx
+    jb      .tc_wait
+
+    ; Тиша. Шлемо той самий SYN ще раз: губиться і перший пакет теж,
+    ; а без повтору одна втрата означала б відмову з'єднання.
+    dec     r13d
+    jnz     .tc_try
+    mov     byte [TcpFailWhy], 5        ; так ніхто нічого й не відповів
+
+.tc_fail:
+    mov     byte [TcpState], TCPS_CLOSED
+    stc
+    jmp     .tc_exit
+.tc_ok:
+    clc
+.tc_exit:
+    pop     r13
+    pop     r11
+    pop     r10
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+; ----------------------------------------------------------
+; TcpSend - надіслати дані й дочекатися підтвердження.
+;   RSI = дані, ECX = скільки їх
+;   -> CF=1, якщо підтвердження не дочекались
+;
+; Крок за раз: шлемо сегмент і чекаємо ACK, перш ніж слати
+; наступний. Вікно відправника нам поки ні до чого - запити, які ми
+; робимо, в один сегмент і вміщаються, а стоп-і-чекай простий і
+; очевидно правильний.
+; ----------------------------------------------------------
+TcpSend:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r10
+    push    r11
+    push    r13
+    push    r14
+
+    cmp     byte [TcpState], TCPS_ESTAB
+    jne     .ts_fail
+    test    ecx, ecx
+    jz      .ts_ok
+    cmp     ecx, 1400
+    jbe     .ts_len_ok
+    mov     ecx, 1400               ; в один сегмент більше не кладемо
+.ts_len_ok:
+
+    mov     r10, rsi
+    mov     r11d, ecx
+
+    ; Номер, з якого йдуть ці дані, і номер, після якого вони
+    ; закінчуються. TcpSndNxt рушимо аж тоді, коли їх підтвердять:
+    ; повторний сегмент мусить піти з ТИМ САМИМ номером, інакше для
+    ; того боку це буде новий шматок, а не повтор загубленого.
+    mov     edi, [TcpSndNxt]        ; EDI = початковий номер (поле 32-бітне)
+    mov     r14d, edi
+    add     r14d, r11d              ; R14D = номер після наших даних
+
+    mov     r13d, TCP_RETRIES
+.ts_try:
+    mov     [TcpSndNxt], edi        ; щоразу з того самого місця
+    mov     byte [TcpGotAck], 0
+    mov     dl, TCP_PSH or TCP_ACK
+    call    NetSendTcp
+    jc      .ts_fail
+
+    mov     rbx, [SystemTicks]
+    add     rbx, TCP_RTO
+.ts_wait:
+    call    NetPollBackground
+    cmp     byte [TcpRstSeen], 0
+    jne     .ts_fail
+
+    ; Підтвердили все, що ми послали? Порівнюємо ВІДНІМАННЯМ, а не
+    ; "більше-дорівнює": номери 32-бітні й переповнюються по колу, і
+    ; після переповнення пряме порівняння дало б протилежний висновок.
+    mov     eax, [TcpSndUna]
+    sub     eax, r14d
+    jns     .ts_acked
+
+    mov     rax, [SystemTicks]
+    cmp     rax, rbx
+    jb      .ts_wait
+
+    dec     r13d
+    jnz     .ts_try
+    jmp     .ts_fail
+
+.ts_acked:
+    mov     [TcpSndNxt], r14d       ; тепер дані справді позаду
+.ts_ok:
+    clc
+    jmp     .ts_exit
+.ts_fail:
+    stc
+.ts_exit:
+    pop     r14
+    pop     r13
+    pop     r11
+    pop     r10
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
+TcpRecvWait:
+    push    rax
+    push    rbx
+
+    ; Тут повторювати нічого: дані шле той бік, і якщо сегмент
+    ; загубиться, повторить його теж він - наш ACK просто не посунеться
+    ; вперед, і цього досить. Нам лишається тільки чекати з розумною
+    ; стелею, щоб не висіти вічно, коли сервер замовк назовсім.
+    mov     rbx, [SystemTicks]
+    add     rbx, 10000              ; десять секунд на всю відповідь
+.trw_loop:
+    call    NetPollBackground
+    cmp     byte [TcpFinSeen], 0
+    jne     .trw_done
+    cmp     byte [TcpRstSeen], 0
+    jne     .trw_done
+    ; Буфер повний - далі чекати нема сенсу.
+    mov     eax, [TcpRxLen]
+    cmp     eax, TCP_RXCAP
+    jae     .trw_done
+    mov     rax, [SystemTicks]
+    cmp     rax, rbx
+    jb      .trw_loop
+.trw_done:
+    pop     rbx
+    pop     rax
+    ret
+
+TcpCloseConn:
+    push    rax
+    push    rbx
+    push    rdx
+    push    r10
+    push    r11
+
+    cmp     byte [TcpState], TCPS_ESTAB
+    jne     .tcc_done
+
+    mov     dl, TCP_FIN or TCP_ACK
+    xor     r10, r10
+    xor     r11d, r11d
+    call    NetSendTcp
+    inc     dword [TcpSndNxt]       ; FIN теж займає номер
+
+    mov     rbx, [SystemTicks]
+    add     rbx, 1000               ; секунди на відповідь на наш FIN досить
+.tcc_wait:
+    call    NetPollBackground
+    cmp     byte [TcpFinSeen], 0
+    jne     .tcc_done
+    mov     rax, [SystemTicks]
+    cmp     rax, rbx
+    jb      .tcc_wait
+
+.tcc_done:
+    mov     byte [TcpState], TCPS_CLOSED
+    pop     r11
+    pop     r10
+    pop     rdx
+    pop     rbx
+    pop     rax
+    ret
+
 NsLookupCommand:
     push    rax
     push    rcx
@@ -9538,6 +10378,455 @@ ParseIp:
 ; у режимі QEMU 'user' slirp проксює запити на DNS хоста,
 ; і якщо той мертвий, гість теж нічого не отримає.
 ; ==========================================================
+; ==========================================================
+; TCP <ip> <порт> - відкрити з'єднання й одразу закрити.
+;
+; Команда навмисно нічого не передає: вона перевіряє саме рукостискання,
+; тобто найтоншу частину. Якщо SYN пішов, SYN+ACK повернувся і наш ACK
+; прийняли - решта протоколу вже справа техніки.
+; ==========================================================
+TcpCommand:
+    push    rax
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+    push    r9
+
+    lea     rsi, [CmdBuffer + 4]    ; хвіст після 'TCP '
+    lea     rdi, [TcpCmdIp]
+    call    ParseIp
+    jc      .tcmd_bad
+
+    ; ParseIp зберігає RSI і повертає його на початок рядка, тому
+    ; пропустити адресу доводиться самим: цифри й крапки, потім
+    ; пробіли. Без цього порт розбирався з початку рядка - і замість
+    ; 80 виходило 10.
+.tcmd_skipip:
+    mov     al, [rsi]
+    cmp     al, '.'
+    je      .tcmd_adv
+    cmp     al, '0'
+    jb      .tcmd_skipsp
+    cmp     al, '9'
+    ja      .tcmd_skipsp
+.tcmd_adv:
+    inc     rsi
+    jmp     .tcmd_skipip
+.tcmd_skipsp:
+    cmp     byte [rsi], ' '
+    jne     .tcmd_port
+    inc     rsi
+    jmp     .tcmd_skipsp
+.tcmd_port:
+    call    TcpParsePort
+    jc      .tcmd_bad
+    ; Порт кладемо в пам'ять: DrawString нижче затирає RCX, а тримати
+    ; його в регістрі через півдесятка викликів - шукати біду.
+    mov     [TcpCmdPort], ax
+
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpTrying]
+    mov     r9d, COL_TEXT
+    call    DrawString
+    lea     rsi, [TcpCmdIp]
+    mov     rcx, 130
+    call    NetPrintIp
+
+    ; Порт друкуємо теж - саме на ньому вже раз і спіткнулися:
+    ; ParseIp повертала RSI на початок, і замість 80 виходило 10.
+    movzx   eax, word [TcpCmdPort]
+    lea     rdi, [PciBuf]
+    call    DecToStr
+    mov     rcx, 230
+    mov     rdx, [CursorY]
+    lea     r8, [PciBuf]
+    mov     r9d, COL_BRIGHT
+    call    DrawString
+    call    NewLine
+
+    lea     rsi, [TcpCmdIp]
+    mov     cx, [TcpCmdPort]
+    call    TcpConnect
+    jc      .tcmd_fail
+
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpOk]
+    mov     r9d, 0x0000FF00
+    call    DrawString
+    call    NewLine
+    call    TcpCloseConn
+    jmp     .tcmd_done
+
+.tcmd_fail:
+    ; Кожна причина має власне пояснення. Найважливіше з них - RST:
+    ; він означає, що наш пакет дійшов і його зрозуміли, тобто сам
+    ; протокол працює, а закритий лише порт.
+    lea     r8, [MsgTcpTimeout]
+    cmp     byte [TcpFailWhy], 1
+    jne     .tcf_n1
+    lea     r8, [MsgTcpNoCard]
+.tcf_n1:
+    cmp     byte [TcpFailWhy], 2
+    jne     .tcf_n2
+    lea     r8, [MsgTcpNoArp]
+.tcf_n2:
+    cmp     byte [TcpFailWhy], 3
+    jne     .tcf_n3
+    lea     r8, [MsgTcpNoSend]
+.tcf_n3:
+    cmp     byte [TcpFailWhy], 4
+    jne     .tcf_n4
+    lea     r8, [MsgTcpRst]
+.tcf_n4:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+
+    ; Скільки TCP-сегментів побачили. Нуль означає, що назад не
+    ; прийшло нічого - шукати треба в тому, ЩО ми відправляємо.
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpSeen]
+    mov     r9d, COL_DIM
+    call    DrawString
+    mov     eax, [TcpRxSegs]
+    lea     rdi, [PciBuf]
+    call    DecToStr
+    mov     rcx, 220
+    mov     rdx, [CursorY]
+    lea     r8, [PciBuf]
+    mov     r9d, COL_DIM
+    call    DrawString
+    call    NewLine
+    jmp     .tcmd_done
+
+.tcmd_bad:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpUsage]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+
+.tcmd_done:
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rax
+    ret
+
+; ==========================================================
+; GET <ip> - забрати кореневу сторінку по HTTP.
+;
+; Запит навмисно HTTP/1.0 і без заголовка Host: у 1.0 він не
+; обов'язковий, а будувати його з адреси заради перевірки транспорту
+; сенсу немає. Версія 1.0 зручна ще й тим, що сервер сам закриває
+; з'єднання, віддавши відповідь, - тобто FIN приходить природно, і
+; нам не треба вгадувати, скільки байтів чекати.
+; ==========================================================
+; ----------------------------------------------------------
+; StrAppendZ - дописати рядок RSI у кінець RDI.
+; RDI лишається за останнім скопійованим байтом, нуля не кладемо:
+; рядок збирається шматками, і термінатор ставить той, хто закінчив.
+; RSI не псуємо.
+; ----------------------------------------------------------
+StrAppendZ:
+    push    rax
+    push    rsi
+.saz_loop:
+    mov     al, [rsi]
+    test    al, al
+    jz      .saz_done
+    mov     [rdi], al
+    inc     rsi
+    inc     rdi
+    jmp     .saz_loop
+.saz_done:
+    pop     rsi
+    pop     rax
+    ret
+
+; ==========================================================
+; GET <хост> [шлях] - забрати сторінку по HTTP.
+;
+; Хост можна писати і адресою, і іменем: спершу пробуємо розібрати
+; як IP, і лише коли не виходить - питаємо DNS. Так GET 1.1.1.1 не
+; йде резолвити рядок "1.1.1.1", як колись робив PING.
+;
+; Запит - HTTP/1.0 із заголовком Host:. Без нього сервери з іменним
+; хостингом віддають чужу сторінку або помилку: на одній адресі їх
+; сотні, і розрізняє їх саме цей рядок. Версія 1.0 зручна тим, що
+; сервер сам закриває з'єднання, віддавши відповідь, - FIN приходить
+; природно, і не треба вгадувати, скільки байтів чекати.
+; ==========================================================
+HttpGetCommand:
+    push    rax
+    push    rbx
+    push    rcx
+    push    rdx
+    push    rsi
+    push    rdi
+    push    r8
+    push    r9
+    push    r12
+    push    r13
+
+    ; Без картки не буде ні DNS, ні з'єднання. Перевіряємо тут, бо
+    ; інакше помилка виходить брехлива: резолвер спиняється на ARP і
+    ; каже "не змогла розв'язати ім'я", хоча мережі просто немає.
+    cmp     byte [NetReady], 0
+    jne     .hg_card_ok
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpNoCard]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+    jmp     .hg_done
+.hg_card_ok:
+
+    lea     rsi, [CmdBuffer + 4]    ; хвіст після .GET .
+    mov     r12, rsi                ; початок імені хоста
+
+    ; --- Розрізаємо на хост і шлях ---
+.hg_tok:
+    mov     al, [rsi]
+    test    al, al
+    jz      .hg_nopath
+    cmp     al, ' '
+    je      .hg_split
+    inc     rsi
+    jmp     .hg_tok
+.hg_split:
+    mov     byte [rsi], 0           ; обриваємо ім'я просто в рядку команди
+    inc     rsi
+.hg_sp:
+    cmp     byte [rsi], ' '
+    jne     .hg_havepath
+    inc     rsi
+    jmp     .hg_sp
+.hg_havepath:
+    cmp     byte [rsi], 0
+    je      .hg_nopath
+    lea     rdi, [HttpPath]
+    call    StrAppendZ
+    mov     byte [rdi], 0
+    jmp     .hg_haveall
+.hg_nopath:
+    mov     byte [HttpPath], '/'
+    mov     byte [HttpPath + 1], 0
+.hg_haveall:
+
+    test    r12, r12
+    jz      .hg_bad
+    cmp     byte [r12], 0
+    je      .hg_bad
+
+    ; --- Адреса: спершу як IP, потім через DNS ---
+    mov     rsi, r12
+    lea     rdi, [TcpCmdIp]
+    call    ParseIp
+    jnc     .hg_haveip
+
+    mov     rsi, r12
+    call    NetResolve
+    jc      .hg_dnsfail
+    lea     rsi, [NetTargetIp]
+    lea     rdi, [TcpCmdIp]
+    mov     rcx, 4
+    cld
+    rep     movsb
+
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgHttpResolved]
+    mov     r9d, COL_DIM
+    call    DrawString
+    lea     rsi, [TcpCmdIp]
+    mov     rcx, 130
+    call    NetPrintIp
+    call    NewLine
+.hg_haveip:
+
+    ; --- Збираємо запит ---
+    lea     rdi, [HttpReqBuf]
+    lea     rsi, [HttpTxtGet]
+    call    StrAppendZ
+    lea     rsi, [HttpPath]
+    call    StrAppendZ
+    lea     rsi, [HttpTxtVer]
+    call    StrAppendZ
+    mov     rsi, r12
+    call    StrAppendZ
+    lea     rsi, [HttpTxtTail]
+    call    StrAppendZ
+    lea     rax, [HttpReqBuf]
+    mov     r13, rdi
+    sub     r13, rax                ; R13 = довжина запиту
+
+    mov     word [TcpCmdPort], 80
+    lea     rsi, [TcpCmdIp]
+    mov     cx, 80
+    call    TcpConnect
+    jc      .hg_failed
+
+    lea     rsi, [HttpReqBuf]
+    mov     ecx, r13d
+    call    TcpSend
+    jc      .hg_nosend
+
+    call    TcpRecvWait
+    call    TcpCloseConn
+
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgHttpBytes]
+    mov     r9d, COL_BRIGHT
+    call    DrawString
+    mov     eax, [TcpRxLen]
+    lea     rdi, [PciBuf]
+    call    DecToStr
+    mov     rcx, 150
+    mov     rdx, [CursorY]
+    lea     r8, [PciBuf]
+    mov     r9d, COL_BRIGHT
+    call    DrawString
+    call    NewLine
+
+    cmp     dword [TcpRxLen], 0
+    je      .hg_done
+
+    ; --- Друкуємо початок відповіді ---
+    ;
+    ; Рядки ріжемо на місці: буфер нам більше не потрібен, а копіювати
+    ; кожен кудись іще - зайва робота заради нічого.
+    mov     r12, TcpRxBase
+    xor     r13d, r13d
+.hg_line:
+    cmp     r13d, 14                ; більше екран однаково не покаже
+    jae     .hg_done
+    mov     rsi, r12
+.hg_scan:
+    mov     eax, [TcpRxLen]
+    mov     rbx, TcpRxBase
+    add     rbx, rax
+    cmp     r12, rbx
+    jae     .hg_done                ; дані скінчились
+    mov     al, [r12]
+    cmp     al, 13
+    je      .hg_eol
+    cmp     al, 10
+    je      .hg_eol
+    inc     r12
+    jmp     .hg_scan
+.hg_eol:
+    mov     byte [r12], 0
+    inc     r12
+    mov     al, [r12]
+    cmp     al, 10                  ; за CR майже завжди йде LF
+    jne     .hg_print
+    inc     r12
+.hg_print:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    mov     r8, rsi
+    mov     r9d, COL_TEXT
+    call    DrawString
+    call    NewLine
+    inc     r13d
+    jmp     .hg_line
+
+.hg_nosend:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgHttpNoSend]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+    call    TcpCloseConn
+    jmp     .hg_done
+
+.hg_dnsfail:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgHttpDnsFail]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+
+    ; Змінні діагностики в NetResolve були, але їх ніхто не друкував.
+    ; Стадія каже, де саме воно спинилось: 1 - увійшли, 2 - MAC шлюзу
+    ; відома, 3 - зібрали запит, 4 - повернулись із відправки. Четверта
+    ; разом із "надіслано: 1" означає, що запит пішов, а відповіді немає.
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgDnsStage]
+    mov     r9d, COL_DIM
+    call    DrawString
+    mov     eax, [DnsStage]
+    lea     rdi, [PciBuf]
+    call    DecToStr
+    mov     rcx, 210
+    mov     rdx, [CursorY]
+    lea     r8, [PciBuf]
+    mov     r9d, COL_DIM
+    call    DrawString
+
+    mov     rcx, 250
+    mov     rdx, [CursorY]
+    lea     r8, [MsgDnsTx]
+    mov     r9d, COL_DIM
+    call    DrawString
+    movzx   eax, byte [DnsTxOk]
+    lea     rdi, [PciBuf]
+    call    DecToStr
+    mov     rcx, 370
+    mov     rdx, [CursorY]
+    lea     r8, [PciBuf]
+    mov     r9d, COL_DIM
+    call    DrawString
+    call    NewLine
+    jmp     .hg_done
+
+.hg_failed:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgTcpTimeout]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+    jmp     .hg_done
+
+.hg_bad:
+    mov     rcx, 10
+    mov     rdx, [CursorY]
+    lea     r8, [MsgHttpUsage]
+    mov     r9d, COL_ERROR
+    call    DrawString
+    call    NewLine
+
+.hg_done:
+    pop     r13
+    pop     r12
+    pop     r9
+    pop     r8
+    pop     rdi
+    pop     rsi
+    pop     rdx
+    pop     rcx
+    pop     rbx
+    pop     rax
+    ret
+
 SetDnsCommand:
     push    rax
     push    rcx
@@ -11585,6 +12874,8 @@ SyscallHandler:
     je      .sys_canvas_seq
     cmp     rax, 45                 ; віддати решту кванта
     je      .sys_yield
+    cmp     rax, 46                 ; де лежить текст задачі у вікні
+    je      .sys_app_text
 
     jmp     .syscall_end        
 
@@ -11791,6 +13082,18 @@ SyscallHandler:
 .sys_canvas_seq:
     xor     rax, rax
     mov     eax, [CanvasSeq]
+    jmp     .syscall_end
+
+; ------------------------------------------------------------
+; syscall 46 - де лежить текст, надрукований задачею у вікні.
+;   RAX = адреса заголовка:
+;         +0  буфер, +8 довжина, +12 лічильник змін
+;
+; Адресу оболонка бере один раз і далі читає поля прямо з пам'яті:
+; вона спільна, тож питати ядро на кожному кадрі немає потреби.
+; ------------------------------------------------------------
+.sys_app_text:
+    mov     rax, AppTextHdr
     jmp     .syscall_end
 
 ; ------------------------------------------------------------
@@ -12255,7 +13558,12 @@ SyscallHandler:
 
 .sys_print:
     call    .no_screen
-    jc      .syscall_end
+    jnc     .sp_to_screen
+    ; Задача у вікні: текст не малюємо, а складаємо в буфер - його
+    ; покаже оболонка. Досі він тут просто зникав.
+    call    AppTextPutStr
+    jmp     .syscall_end
+.sp_to_screen:
     mov     rcx, [CursorX]      
     mov     rdx, [CursorY]      
     mov     r8,  rsi            
@@ -12266,7 +13574,10 @@ SyscallHandler:
     
 .sys_clear:
     call    .no_screen
-    jc      .syscall_end
+    jnc     .sc_to_screen
+    call    AppTextReset
+    jmp     .syscall_end
+.sc_to_screen:
     call    ClearScreen
     mov     qword [CursorX], 20     
     mov     qword [CursorY], 40
@@ -12360,7 +13671,11 @@ SyscallHandler:
 
 .sys_putchar:
     call    .no_screen
-    jc      .syscall_end
+    jnc     .spc_to_screen
+    mov     al, sil                 ; молодший байт RSI - сам символ
+    call    AppTextPutChar
+    jmp     .syscall_end
+.spc_to_screen:
     cmp     rsi, 10             
     je      .putchar_newline
     cmp     rsi, 13             
@@ -12378,7 +13693,16 @@ SyscallHandler:
 
 .sys_erasechar:
     call    .no_screen
-    jc      .syscall_end
+    jnc     .se_to_screen
+    ; У буфері стерти символ - це просто вкоротити його на байт.
+    mov     eax, [AppTextHdr + 8]
+    test    eax, eax
+    jz      .syscall_end
+    dec     eax
+    mov     [AppTextHdr + 8], eax
+    inc     dword [AppTextHdr + 12]
+    jmp     .syscall_end
+.se_to_screen:
     mov     rcx, [CursorX]
     cmp     rcx, 20             
     jle     .syscall_end
@@ -12388,7 +13712,7 @@ SyscallHandler:
     mov     rdx, [CursorY]
     call    EraseChar           
     jmp     .syscall_end
-    
+
 .sys_ls:
     call    .no_screen
     jc      .syscall_end
@@ -13612,6 +14936,76 @@ InitTask1:
 ; причому зіпсувався б вміст файлу, а не впав стек, тобто дізналися
 ; б ми про це набагато пізніше й зовсім не там.
 ; ------------------------------------------------------------
+; БУФЕР ТЕКСТУ ЗАДАЧІ У ВІКНІ
+;
+; Текстові виклики малюють прямо у фреймбуфер, повз blit, і полотна
+; не бачать. Спершу задачі з полотном їх просто не виконували - і
+; програма, яка лише друкує, у вікні не показувала нічого. Тепер
+; текст складається сюди, а показує його оболонка.
+;
+; Буфер один, як і вікно програми: розрізняти кількох дітей ядро
+; однаково не вміє.
+; ------------------------------------------------------------
+
+; AppTextPutChar - додати байт AL. Регістри лишає як були.
+;
+; Коли місця не стало, викидаємо ПЕРШУ половину. Журнал запуску
+; цікавий на початку, працююча програма - у кінці; половина зберігає
+; обидва краї краще, ніж будь-яке з двох правил окремо.
+AppTextPutChar:
+    push    rbx
+    push    rcx
+    push    rdi
+    push    rsi
+    mov     bl, al
+
+    mov     ecx, [AppTextHdr + 8]
+    cmp     ecx, APPTEXT_MAX
+    jb      .atp_room
+    mov     rsi, AppTextBase + APPTEXT_MAX / 2
+    mov     rdi, AppTextBase
+    mov     rcx, APPTEXT_MAX / 2
+    cld
+    rep     movsb
+    mov     ecx, APPTEXT_MAX / 2
+.atp_room:
+    mov     rdi, AppTextBase
+    add     rdi, rcx
+    mov     [rdi], bl
+    inc     ecx
+    mov     [AppTextHdr + 8], ecx
+    inc     dword [AppTextHdr + 12]
+
+    pop     rsi
+    pop     rdi
+    pop     rcx
+    pop     rbx
+    ret
+
+; AppTextPutStr - додати рядок із RSI до нуля.
+AppTextPutStr:
+    push    rax
+    push    rsi
+.atps_loop:
+    mov     al, [rsi]
+    test    al, al
+    jz      .atps_done
+    call    AppTextPutChar
+    inc     rsi
+    jmp     .atps_loop
+.atps_done:
+    pop     rsi
+    pop     rax
+    ret
+
+; AppTextReset - буфер порожній. Кличеться і при запуску задачі,
+; щоб у вікні не лишався журнал попередньої.
+AppTextReset:
+    mov     dword [AppTextHdr + 8], 0
+    inc     dword [AppTextHdr + 12]
+    ret
+
+; ------------------------------------------------------------
 FsSyscallList:
     db 5, 8, 13, 14, 16, 17, 18, 19, 20, 24, 29
     db 32, 33, 34, 35, 36, 38, 39
@@ -13696,6 +15090,7 @@ SpawnAppTask:
     mov     eax, [PendingCanvasS]
     mov     [TaskCanvasS + rcx*4], eax
     mov     qword [PendingCanvas], 0
+    call    AppTextReset            ; щоб не лишався журнал попередньої
 
     mov     [AppTask], rcx
     mov     byte [AppRunning], 1    

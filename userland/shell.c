@@ -87,20 +87,13 @@ static void files_refresh(Window* w);
 static void open_player(const char* name);
 static void ask_and_run(const char* name);
 static void frame_sync(void);
+static void open_app_window(const char* name);
 
-/* Запустити програму й повернутися сюди ж.
- *
- * Раніше тут стояв exec_program, після якого оболонка не існувала:
- * ядро вивантажувало її, а після виходу програми вантажило з диска
- * заново. Усі вікна, поточний каталог і виділення при цьому
- * зникали, бо це була вже інша оболонка.
- *
- * Тепер ми просто засинаємо. Стан лишається наш, але екран програма
- * зіпсувала — тому перемальовуємо все. */
-static void run_and_return(const char* name) {
-    spawn_program(name);
-    gui_invalidate_all();
-}
+/* Тут стояв run_and_return: spawn_program (syscall 37) присипляв
+   оболонку на час роботи програми й перемальовував екран після неї.
+   Тепер програма живе у вікні, а оболонка при цьому не спить, тож
+   повноекранного шляху з GUI більше немає - лишився лише в консолі
+   ядра. Сам syscall 37 нікуди не подівся. */
 static void open_viewer(const char* name);
 
 /* ============================================================
@@ -294,7 +287,7 @@ static void console_exec(const char* cmd) {
         log_add(cmd + 5);
     }
     else if (strncasecmp(cmd, "run ", 4) == 0) {
-        run_and_return(cmd + 4);
+        open_app_window(cmd + 4);
     }
     else if (strcasecmp(cmd, "exit") == 0) {
         wm_quit();
@@ -923,11 +916,65 @@ static GuiBitmap g_appfb = { 0, 0, 0 };
 static char      g_appname[FNAME_CAP];
 static uint32_t  g_appseq = 0;   /* останній показаний кадр полотна */
 static int       g_app_modal = 0; /* усередині діалогу з цього ж вікна */
+static const AppText* g_apptext = 0;
+static uint32_t  g_apptextseq = 0;
+static int       g_appdrew = 0;  /* чи намалювала програма хоч кадр */
+static int       g_appdone = 0;  /* програма завершилась, вікно лишилось */
+
+/* Те, що програма надрукувала. Показуємо, доки вона не намалювала
+   жодного кадру: у графічної програми журнал запуску своє віддав, а
+   в текстової іншого вмісту й не буде.
+
+   Хвіст цікавіший за початок, тому потрібну кількість рядків
+   відлічуємо з кінця. */
+static void app_paint_text(const GuiRect* c) {
+    gui_fill_rect(c, 0x00000000);
+    if (!g_apptext || g_apptext->len == 0 || !g_apptext->text) return;
+
+    const char* s = g_apptext->text;
+    int n = (int)g_apptext->len;
+    int rows = (c->h - 8) / GUI_LINE_H;
+    if (rows < 1) rows = 1;
+
+    int start = 0, seen = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        if (s[i] == '\n') {
+            seen++;
+            if (seen >= rows) { start = i + 1; break; }
+        }
+        start = i;
+    }
+
+    int bottom = c->y + c->h - GUI_LINE_H;
+    int right  = c->x + c->w - 2;
+    int y = c->y + 4;
+    char line[160];
+    int k = 0;
+    for (int i = start; i < n && y <= bottom; i++) {
+        char ch = s[i];
+        if (ch == '\r') continue;
+        if (ch != '\n' && k < (int)sizeof(line) - 1) { line[k++] = ch; continue; }
+        line[k] = 0;
+        gui_text_clip(line, c->x + 4, y, right, 0x00C0C0C0);
+        y += GUI_LINE_H;
+        k = 0;
+        /* Занадто довгий рядок просто переносимо: обрізати його
+           мовчки означало б втратити кінець назавжди. */
+        if (ch != '\n') line[k++] = ch;
+    }
+    if (k > 0 && y <= bottom) {
+        line[k] = 0;
+        gui_text_clip(line, c->x + 4, y, right, 0x00C0C0C0);
+    }
+}
+
 
 /* Кадровий такт спільний на всіх, тому вмикаємо його не наказом,
    а узгодженням: хтось із двох його хоче - він іде. */
 static void frame_sync(void) {
-    gui_frame_events((g_vplaying || g_app) ? 41 : 0);
+    /* Дограла - такт більше нікому не потрібен: вікно лишається
+       стояти з останнім, що вона показала. */
+    gui_frame_events((g_vplaying || (g_app && !g_appdone)) ? 41 : 0);
 }
 
 static void app_title(void) {
@@ -935,7 +982,8 @@ static void app_title(void) {
     char t[80];
     t[0] = 0;
     sappend(t, sizeof(t), g_appname);
-    sappend(t, sizeof(t), "  —  Ctrl+Shift+Q to end");
+    if (g_appdone) sappend(t, sizeof(t), "  —  finished");
+    else           sappend(t, sizeof(t), "  —  Ctrl+Shift+Q to end");
     wnd_set_title(g_app, t);
 }
 
@@ -956,6 +1004,9 @@ static long app_proc(Window* w, int msg, long a, long b) {
     switch (msg) {
     case WM_PAINT: {
         GuiRect c; wnd_client_rect(w, &c);
+        /* Доки програма не намалювала жодного кадру, у вікні видно
+           те, що вона надрукувала. */
+        if (!g_appdrew) { app_paint_text(&c); return 0; }
         if (!g_appfb.px) { gui_fill_rect(&c, 0x00000000); return 0; }
 
         int dw = c.w, dh = c.h;
@@ -982,15 +1033,30 @@ static long app_proc(Window* w, int msg, long a, long b) {
            стежимо, чи вона жива, і перемальовуємо вікно тоді, коли
            там справді з'явився новий кадр. */
         if (!child_alive()) {
-            /* Не закриваємо вікно, поки його ж обробник сидить у
-               модальному діалозі: dlg_modal крутить той самий цикл
-               подій, тобто WM_FRAME туди доходить, і знищення вікна
-               висмикнуло б його з-під власного стека. */
-            if (!g_app_modal) app_close();
+            /* Програма завершилась - вікно НЕ закриваємо. Спершу
+               закривали, і через це нічого не було видно: HELLO
+               друкує й виходить за мілісекунди, тож вікно зникало
+               раніше, ніж устигало намалюватися. Хай стоїть із
+               останнім, що вона показала, доки не закриють. */
+            if (!g_appdone) {
+                g_appdone = 1;
+                frame_sync();
+                app_title();
+                wnd_invalidate_client(w);
+            }
             return 0;
         }
         uint32_t s = canvas_seq();
-        if (s != g_appseq) { g_appseq = s; wnd_invalidate_client(w); }
+        if (s != g_appseq) {
+            g_appseq  = s;
+            g_appdrew = 1;          /* малює - показуємо полотно */
+            wnd_invalidate_client(w);
+            return 0;
+        }
+        if (!g_appdrew && g_apptext && g_apptext->seq != g_apptextseq) {
+            g_apptextseq = g_apptext->seq;
+            wnd_invalidate_client(w);
+        }
         return 0;
     }
 
@@ -1023,7 +1089,12 @@ static long app_proc(Window* w, int msg, long a, long b) {
 }
 
 static void open_app_window(const char* name) {
-    if (g_app) { wnd_activate(g_app); return; }
+    if (g_app) {
+        /* Попередня ще працює - просто піднімаємо її вікно. Дограла -
+           її вікно вже нічого не тримає, прибираємо й запускаємо. */
+        if (child_alive()) { wnd_activate(g_app); return; }
+        app_close();
+    }
 
     /* Вікна немає, а дитина є - значить, попередня ще працює. Пускати
        другу не можна: обидві читали б диск через ті самі буфери ядра
@@ -1052,7 +1123,11 @@ static void open_app_window(const char* name) {
     g_appfb.px = px;
     g_appfb.w  = (int)sw;
     g_appfb.h  = (int)sh;
-    g_appseq   = canvas_seq();   /* рахуємо новим лише те, що буде далі */
+    g_appseq     = canvas_seq();   /* рахуємо новим лише те, що буде далі */
+    g_apptext    = app_text();
+    g_apptextseq = g_apptext ? g_apptext->seq : 0;
+    g_appdrew    = 0;
+    g_appdone    = 0;
 
     int j = 0;
     while (name[j] && j < FNAME_CAP - 1) { g_appname[j] = name[j]; j++; }
@@ -1079,21 +1154,19 @@ static void open_app_window(const char* name) {
     wnd_activate(g_app);        /* WM_ACTIVATE сам віддасть клавіші дитині */
     wnd_invalidate(g_app);
 }
+/* Питання одне на два місця, звідки запускають програму.
 
-/* Питання одне на два місця, звідки запускають програму. Вибір тут
-   справжній: у вікно вміє лише те, що малює графіку через blit.
-   Текстові виклики задачі з полотном ядро просто не виконує, тому
-   програма, яка лише друкує, у вікні не покаже нічого. */
+   Вибору між вікном і повним екраном більше немає. Він з'явився
+   тому, що текст програми у вікні не було де показати, і діалог
+   мусив питати користувача про те, чого той знати не може: малює
+   вона графікою чи друкує. Тепер видно і те, і те. */
 static void ask_and_run(const char* name) {
-    char q[160];
+    char q[112];
     q[0] = 0;
     sappend(q, sizeof(q), "Run ");
     sappend(q, sizeof(q), name);
-    sappend(q, sizeof(q), "?\n\nYes - in a window (graphics programs only)\n");
-    sappend(q, sizeof(q), "No - full screen, the shell waits for it");
-    int r = msg_box("Run", q, MB_YESNOCANCEL);
-    if (r == IDYES)     open_app_window(name);
-    else if (r == IDNO) run_and_return(name);
+    sappend(q, sizeof(q), "?\nIt opens in a window; Ctrl+Shift+Q ends it.");
+    if (msg_box("Run", q, MB_OKCANCEL) == IDOK) open_app_window(name);
 }
 
 /* Кнопка «вгору» — те саме, що подвійний клік по [..] */
@@ -1741,7 +1814,7 @@ static long progman_proc(Window* w, int msg, long a, long b) {
             char nm[FNAME_CAP];
             nm[0] = 0;
             if (dlg_input("Run", "Program name:", nm, FNAME_CAP) && nm[0])
-                run_and_return(nm);
+                open_app_window(nm);
             return 0;
         }
         case IDM_EXIT:
